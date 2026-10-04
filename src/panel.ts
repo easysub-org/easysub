@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 共享控制面板（扩展弹窗 + 纯 Web 版共用）。
 //
 // 本模块的**全部** DOM 引用都来自 src/ui-body.html 里的 id（两端同一份模板），
@@ -16,6 +18,10 @@ import {
 import { listModelKeys, saveModelFilesAtomic, saveModelBlob, getModelFile } from './model-db';
 import { TRANSCRIPT_MAX, clearTranscript } from './transcript-store';
 import { initCompatCheck, openCompatCheck } from './compat';
+// 本机助手（桌面端）：探测 → 配对 → 从桌面端取 16k PCM。产品纪律见 src/helper.ts 文件头。
+import {
+  HelperInfo, HelperSession, helperErrorMessage, loadHelperSession, pairHelper, probeHelper, saveHelperSession,
+} from './helper';
 
 const $ = (id: string) => document.getElementById(id)!;
 // 可选元素（Web 版外壳独有）：扩展 popup 模板里没有这些 id，取值一律走这里，
@@ -31,7 +37,7 @@ const $opt = (id: string) => document.getElementById(id);
 export interface PanelHostHooks {
   // 「开始」按钮的第一件事（任何 await 之前）。返回对象会合并进 START_RECOGNITION 消息。
   // 抛错视为"用户取消了本次启动"，不再继续。
-  prepareStart?(source: 'tab' | 'system' | 'mic'): Promise<Record<string, any> | void>;
+  prepareStart?(source: 'tab' | 'system' | 'mic' | 'helper'): Promise<Record<string, any> | void>;
   // 本次启动半路夭折（用户取消屏幕选择、环境不合格、模型没装、没有可用音源……）。
   // 宿主用它回收 prepareStart 里已经做掉的副作用——否则"预开的字幕浮窗"会孤零零留在
   // 屏幕上（用户以为已经开始识别了，实际什么都没跑）。扩展侧不注册（它没有预开窗口）。
@@ -43,7 +49,7 @@ export interface PanelHostHooks {
   customizeText?(lang: string): void;
   // 音源提示语覆盖：拿到 source 返回自定义文案，返回 undefined 走模板默认的 i18n 文案。
   // Web 版的系统音频走"共享标签页音频"也能用，提示语与扩展侧不是一回事。
-  sourceHint?(source: 'tab' | 'system' | 'mic', lang: string): string | undefined;
+  sourceHint?(source: 'tab' | 'system' | 'mic' | 'helper', lang: string): string | undefined;
   // 模型刚就绪（一键下载完成 / 手动导入成功）后的宿主动作。
   // 纯 Web 版用它在此时才注入 wasm 脚本（此前模型缺失，注入会留下半初始化的运行时），
   // 这样用户点「开始」时 wasm 往往已就绪，出字更快。扩展包内自带模型，无需此回调。
@@ -123,6 +129,93 @@ function showMicErrorModal(body: string) {
 }
 micErrOk.onclick = () => { micErrModal.hidden = true; };
 micErrModal.onclick = (e) => { if (e.target === micErrModal) micErrModal.hidden = true; };
+
+// —— 桌面助手·配对（两端共用）——
+// 产品要求（别改）：**探测到助手才显示这个音源**；且**配对成功后才可用**。
+// 助手会把本机音频交给任何连上来的页面，所以配对码只显示在用户自己启动的助手窗口里，
+// 它就是"用户在场"的证明；配对成功后换长期设备令牌，之后不再打扰用户。
+let helperInfo: HelperInfo | null = null;
+let helperSession: HelperSession | null = null;
+let helperContinuation: (() => void) | null = null;
+
+const helperPairModal = $opt('helperPairModal') as HTMLDivElement | null;
+const helperPairCodeEl = $opt('helperPairCode') as HTMLInputElement | null;
+const helperPairErrEl = $opt('helperPairErrEl') as HTMLParagraphElement | null;
+
+function fillHelperPairText() {
+  if (!helperPairModal) return;
+  const set = (id: string, key: string) => { const el = $opt(id); if (el) el.textContent = tSync(currentLang, key); };
+  set('helperPairTitleEl', 'helperPairTitle');
+  set('helperPairBodyEl', 'helperPairBody');
+  set('helperPairCodeLabel', 'helperPairCodeLabel');
+  set('helperPairSubmit', 'helperPairSubmit');
+  set('helperPairCancel', 'helperPairCancel');
+}
+function showHelperPairModal() {
+  if (!helperPairModal) return;
+  fillHelperPairText();
+  if (helperPairErrEl) { helperPairErrEl.hidden = true; helperPairErrEl.textContent = ''; }
+  helperPairModal.hidden = false;
+  helperPairCodeEl?.focus();
+}
+function hideHelperPairModal() {
+  if (helperPairModal) helperPairModal.hidden = true;
+  if (helperPairCodeEl) helperPairCodeEl.value = '';
+}
+function showHelperPairError(text: string) {
+  if (!helperPairErrEl) return;
+  helperPairErrEl.textContent = text;
+  helperPairErrEl.hidden = false;
+}
+async function submitHelperPair() {
+  const port = helperInfo?.port;
+  const code = (helperPairCodeEl?.value || '').trim();
+  if (!port) { showHelperPairError(tSync(currentLang, 'helperNotFound')); return; }
+  if (!code) return;
+  if (helperPairErrEl) helperPairErrEl.hidden = true;
+  const res = await pairHelper(port, code);
+  if (!res.ok) {
+    // 前端按助手的稳定 code 渲染自己的文案（message 只是桌面端语言的兜底）
+    showHelperPairError(helperErrorMessage(res.code, res.message, currentLang));
+    return;
+  }
+  helperSession = { port, token: res.token, label: res.label, pairedAt: Date.now() };
+  await saveHelperSession(helperSession);
+  hideHelperPairModal();
+  log(tSync(currentLang, 'helperPairSuccess'));
+  const cont = helperContinuation;
+  helperContinuation = null;
+  if (cont) cont();
+}
+if (helperPairModal) {
+  $opt('helperPairSubmit')?.addEventListener('click', () => { void submitHelperPair(); });
+  $opt('helperPairCancel')?.addEventListener('click', () => {
+    helperContinuation = null;
+    hideHelperPairModal();
+    setStatus('Stopped');
+    updateSourceHint();
+  });
+  helperPairCodeEl?.addEventListener('keydown', (e) => {
+    if ((e as KeyboardEvent).key === 'Enter') void submitHelperPair();
+  });
+}
+
+// 探测本机助手：**音源常驻显示**，探测结果只用来决定"能不能启动"与提示语。
+// 产品要求（2026-10-05 修正）：不再"探测不到就藏起来"——用户实测在 dist-web 里根本找不到这个
+// 音源（CORS/端口一变探测就失败），于是连"该怎么配对"都无从下手。现在改成：
+// 音源一直在列表里，选中后由提示语说明当前状态（没检测到 / 未配对 / 已暂停 / 可用），
+// **并且必须配对成功才能启动**（未配对 → 弹配对模态；没检测到 → 弹模态并说明原因）。
+async function detectHelper(full = false) {
+  const saved = await loadHelperSession();
+  helperSession = null;
+  // full=false：面板打开时只探开头几个端口（别在控制台刷 20 条失败请求）；
+  // 用户选了「桌面助手」或点了「开始」时用 full=true 全扫一遍（助手可能漂移到后面的端口）。
+  try { helperInfo = await probeHelper({ full }); } catch { helperInfo = null; }
+  // 探测时带上已存令牌：助手回 paired=true 才说明这个浏览器仍然有效
+  if (helperInfo?.paired && saved && saved.port === helperInfo.port) helperSession = saved;
+  updateSourceHint();
+}
+
 // —— 系统音频·选择器前置确认框（两端共用）——
 const sysPickModal = $('sysPickModal') as HTMLDivElement;
 const sysPickTitle = $('sysPickTitle');
@@ -241,6 +334,8 @@ async function applyLang() {
   if (optSys) optSys.textContent = tr('sourceSystem');
   const optMic = $opt('optSourceMic');
   if (optMic) optMic.textContent = tr('sourceMic');
+  const optHelper = $opt('optSourceHelper');
+  if (optHelper) optHelper.textContent = tr('sourceHelper');
   $('sourceTip').textContent = tr('sourceOutsideTip');
   updateSourceHint();
   // 模态开着时切语言：卡片文案同步刷新（见 fillUnsupportedModalText 注释）
@@ -249,6 +344,8 @@ async function applyLang() {
   if (!sysPickModal.hidden) fillSysPickModalText();
   // 麦克风失败模态同理
   if (!micErrModal.hidden) fillMicErrorModalText();
+  // 配对模态的语言也要跟着切换刷新（与 mic 错误模态同一处理）
+  if (helperPairModal && !helperPairModal.hidden) fillHelperPairText();
   $('showSubtitles').textContent = tr('showSubtitles');
   $('fontLabel').textContent = tr('font');
   $('modelInfo').textContent = tr('modelInfo');
@@ -386,8 +483,10 @@ async function loadPrefs() {
   // 音源恢复：三态直读，不做平台相关的静默回退。若在不支持平台上恢复出 system，
   // 用户会立刻看到 updateSourceHint 给出的「当前设备不支持」原因——比偷偷改成 tab
   // 更可理解（用户上次明确选过 system，回退会让他以为选项丢失）。
-  const savedSource = prefs.audioSource === 'mic' ? 'mic'
+  // 四态直读（含 helper）：与下面 updateSourceHint 的"选中后当面告知"策略一致
+  const savedSource: AudioSourceId = prefs.audioSource === 'mic' ? 'mic'
     : prefs.audioSource === 'system' ? 'system'
+    : prefs.audioSource === 'helper' ? 'helper'
     : (HAS_TAB_SOURCE ? 'tab' : DEFAULT_AUDIO_SOURCE);
   selSource.value = savedSource;
   updateSourceHint();
@@ -466,7 +565,7 @@ function savePrefs(partial: Record<string, any>) {
 // 用户选了才会看到原因——这就是「允许切换 + 选中后告知为何不行」的实现点。
 function updateSourceHint() {
   // 宿主覆盖优先（Web 版系统音频的说明与扩展不同）
-  const src = selSource.value as 'tab' | 'system' | 'mic';
+  const src = selSource.value as AudioSourceId;
   const overridden = hostHooks()?.sourceHint?.(src, currentLang);
   if (overridden !== undefined) {
     sourceHintEl.textContent = overridden;
@@ -480,6 +579,19 @@ function updateSourceHint() {
   }
   if (selSource.value === 'system') {
     sourceHintEl.textContent = tSync(currentLang, SYSTEM_AUDIO_SUPPORTED ? 'sourceHintSystem' : 'sourceHintNoSysAudio');
+    sourceHintEl.hidden = false;
+    return;
+  }
+  if (selSource.value === 'helper') {
+    // 四种状态都要明确说清楚（而不是给一句"没有声音"让用户自己猜）：
+    // 没检测到 / 助手窗口暂停 / 检测到但未配对 / 已配对可用
+    let key = 'helperNotFound';
+    if (helperInfo) {
+      if (helperInfo.paused) key = 'helperPaused';
+      else if (!helperSession) key = 'sourceHintHelperUnpaired';
+      else key = 'sourceHintHelper';
+    }
+    sourceHintEl.textContent = tSync(currentLang, key);
     sourceHintEl.hidden = false;
     return;
   }
@@ -1031,16 +1143,28 @@ function updateLockUI() {
     : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 1 1 8 0v4"/></svg><span id="lockLabel">' + tr('lock') + '</span>';
 }
 
+
+// 音源下拉 → 音源 id。四态统一在这里读，避免各处 if/else 漏掉新音源
+// （历史上就踩过：新增音源后某处回退逻辑把它静默降级成了 tab）。
+type AudioSourceId = 'tab' | 'system' | 'mic' | 'helper';
+function readSelectedSource(): AudioSourceId {
+  const v = selSource.value;
+  if (v === 'mic') return 'mic';
+  if (v === 'system') return 'system';
+  if (v === 'helper') return 'helper';
+  return HAS_TAB_SOURCE ? 'tab' : DEFAULT_AUDIO_SOURCE;
+}
+
 selSource.onchange = () => {
   // 三态原样落库（含不支持平台上的 system）：不静默改写用户的显式选择，
   // 不支持一事由 updateSourceHint 在选中后当面告知。
-  const v: 'tab' | 'system' | 'mic' =
-    selSource.value === 'mic' ? 'mic'
-      : selSource.value === 'system' ? 'system' : 'tab';
+  const v: AudioSourceId = readSelectedSource();
   // 换了音源就作废"已确认过系统音频说明"：否则用户确认后切走再切回来，
   // 会被当成已确认而直接弹选择器（少了一道说明，也违背"每次重新开始都讲一遍"）。
   pickConfirmPassed = false;
   savePrefs({ audioSource: v });
+  // 用户主动选了「桌面助手」：这时候值得全端口扫一遍（助手可能不在默认端口上）
+  if (v === 'helper') void detectHelper(true);
   updateSourceHint();
 };
 
@@ -1063,10 +1187,29 @@ selSource.onchange = () => {
 // 「开始识别」应当直接弹屏幕选择器，而不是再被问一遍。
 let pickConfirmPassed = false;
 async function doStart(): Promise<void> {
-  const pendingSource: 'tab' | 'system' | 'mic' =
-    selSource.value === 'mic' ? 'mic'
-      : selSource.value === 'system' ? 'system'
-      : (HAS_TAB_SOURCE ? 'tab' : DEFAULT_AUDIO_SOURCE);
+  const pendingSource: AudioSourceId = readSelectedSource();
+  // 桌面助手音源：**必须先配对**（配对码换来的设备令牌是助手认这个页面的唯一凭据）。
+  // 未配对 → 弹配对模态；用户提交成功后由 continuation 重新走一遍 doStart。
+  // 位置刻意排在"系统音频·选择器说明"之前：两者互不相干，别让用户先读一遍无关说明。
+  if (pendingSource === 'helper' && !helperSession) {
+    // 面板刚打开时助手可能还没起来：点「开始」时再探测一次，别让用户重开面板
+    if (!helperInfo) await detectHelper(true);
+    if (!helperSession) {
+      if (!helperInfo) {
+        // 没检测到助手：把原因当面说清楚（配对框照样给出来，助手起来后用户可直接提交）
+        showHelperPairModal();
+        showHelperPairError(tSync(currentLang, 'helperNotFound'));
+        setStatus('Stopped');
+        return;
+      }
+      // 检测到了但未配对：弹配对框；配对成功后由 continuation 重走 doStart
+      helperContinuation = () => { void doStart(); };
+      showHelperPairModal();
+      setStatus('Stopped');
+      return;
+    }
+    // 重新探测后拿到有效令牌：不打扰用户，直接继续启动
+  }
   // 系统音频：先把"浏览器不能单独授权音频、画面流授权后立刻销毁、记得勾上分享音频"
   // 三件事讲清楚，用户点确认后才进入下面的取流链路。
   // 平台不支持系统音频时不弹它——那种情况由下方 SYSTEM_AUDIO_SUPPORTED 门卫弹
@@ -1144,10 +1287,7 @@ async function doStart(): Promise<void> {
     // 模型引导卡已经在屏幕上，用户看得到下一步做什么，这里不必再写一行会被冲掉的日志
     return;
   }
-  const source: 'tab' | 'system' | 'mic' =
-    selSource.value === 'mic' ? 'mic'
-      : selSource.value === 'system' ? 'system'
-      : (HAS_TAB_SOURCE ? 'tab' : DEFAULT_AUDIO_SOURCE);
+  const source: AudioSourceId = readSelectedSource();
   // 坑：不支持平台选了 system 时【必须明确拦下并说明】，不能静默降级成 tab——
   // 降级会让用户以为系统音频能用、只是没声音，排查方向完全错。
   if (source === 'system' && !SYSTEM_AUDIO_SUPPORTED) {
@@ -1173,6 +1313,11 @@ async function doStart(): Promise<void> {
       source,
       lang: currentLang, // 会话语言：宿主用它取 i18n 错误文案（扩展侧由 bg 再读 storage）
       overlayVisible: chkOverlay.checked,
+      // 桌面助手：把探测/配对得到的 {port, token} 交给宿主
+      // （扩展：popup→bg→offscreen 转交；Web：宿主自己也读 storage，这里带上只是同一条协议）
+      ...(source === 'helper' && helperSession
+        ? { helperPort: helperSession.port, helperToken: helperSession.token }
+        : {}),
       ...(hostExtras || {}),
     }).catch(() => {});
     setStatus('Running');
@@ -2028,6 +2173,9 @@ storage.get('tmspeech_use_punct').then(r => {
 });
 // 坑：GET_STATUS 的 locked 现由 bg 异步回源 storage 后 sendResponse（处理器 return true），
 // promise 仍会正常 resolve，但响应晚于同步分支——此处不得假设响应同步可达。
+// 探测本机助手（并行、几百毫秒内出结果，不阻塞面板其它初始化）：
+// 只有探测成功才让「桌面助手」音源出现在下拉里 —— 产品要求。
+void detectHelper();
 sendToHost({ type: 'GET_STATUS' }).then((resp: any) => {
   // 坑：status 缺失（响应异常）时不得调 setStatus——undefined 会落进 else 分支误显 Stopped
   if (resp?.status) setStatus(resp.status, resp.startedAt);

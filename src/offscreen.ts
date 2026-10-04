@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // Offscreen 文档（MV3 扩展宿主）：**只做宿主接线**，识别/标点/翻译/采集的全部逻辑
 // 在 asr-engine.ts 里，与纯 Web 版共用同一份实现。
 //
@@ -13,6 +15,8 @@
 // 误判为"标签页已关闭"而整个清理掉（画面无字幕、麦克风灯灭，且没有任何提示）。
 // 所以：引擎建一次，sink 通过可变引用取"当前端口"。
 import { AsrEngine } from './asr-engine';
+import { HelperSource } from './helper';
+import { tSync } from './i18n';
 
 let port: chrome.runtime.Port;
 
@@ -82,7 +86,9 @@ function setupPort() {
       switch (msg?.type) {
         case 'INIT_OFFSCREEN':
           void engine.init({
-            source: msg.source === 'system' ? 'system' : msg.source === 'mic' ? 'mic' : 'tab',
+            source: msg.source === 'system' ? 'system'
+              : msg.source === 'mic' ? 'mic'
+              : msg.source === 'helper' ? 'helper' : 'tab',
             tabId: msg.tabId ?? null,
             lang: msg.lang,
             usePunct: msg.usePunct,
@@ -94,8 +100,12 @@ function setupPort() {
             translationDirection: msg.translationDirection,
             translationTiming: msg.translationTiming,
           });
+          // 桌面助手：PCM 由本机助手进程采集，经 WS 直接喂进引擎。
+          // 与 mic 的区别：不需要可见页（没有授权框）、不需要 bg 逐块转发（WS 就在本进程里）。
+          if (msg.source === 'helper') startHelperSource(msg.helperPort, msg.helperToken, msg.lang);
           break;
         case 'STOP_OFFSCREEN':
+          stopHelperSource();
           engine.stop();
           break;
         case 'SET_PUNCT':
@@ -156,3 +166,47 @@ function setupPort() {
 
 setupPort();
 console.log('[TM Offscreen] 文档已加载');
+
+// ---- 桌面助手音频源（本机助手 easysub-helper）----
+// 为什么放在 offscreen：这里就是引擎宿主，PCM 到手直接 feedMicChunk，不需要可见页、
+// 不需要 bg 逐块转发（对比 mic：那条链路必须由悬浮窗采、经 bg 中转，因为 Chrome 禁止
+// offscreen 调 getUserMedia）。WS 的地址与令牌由面板探测/配对后经 INIT 下发。
+let helperSource: HelperSource | null = null;
+// 错误文案用会话语言（offscreen 的 getLang 是异步的，这里的 lang 由 INIT 带下来）
+let helperLang = 'zh_CN';
+
+function toPanel(payload: any) {
+  try { port.postMessage({ type: 'FW_POP', payload }); } catch { /* 端口未就绪：丢弃 */ }
+}
+
+function stopHelperSource() {
+  if (helperSource) {
+    helperSource.stop();
+    helperSource = null;
+  }
+}
+
+function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
+  stopHelperSource();
+  helperLang = typeof langRaw === 'string' && langRaw ? langRaw : helperLang;
+  const port = Number(portRaw);
+  const token = String(tokenRaw || '');
+  if (!port || !token) {
+    // 面板应当先完成配对并把令牌带上；走到这里说明 START 组装漏了字段
+    toPanel({ type: 'ERROR', message: tSync(helperLang, 'helperWsError') });
+    return;
+  }
+  helperSource = new HelperSource({
+    port,
+    token,
+    source: 'system',
+    // 引擎会按 16k 直接消费；它内部自己算电平（recordLevel），所以这里不必再报 LEVEL
+    onPcm: (f32, rate) => engine.feedMicChunk(f32, rate),
+    onError: (message, code) => {
+      console.log('[TM Offscreen] 桌面助手错误:', code, message);
+      toPanel({ type: 'ERROR', message });
+    },
+    log: (message) => engine.log(message),
+  });
+  helperSource.start();
+}

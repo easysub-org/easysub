@@ -59,6 +59,9 @@
         <option value="tab" id="optSourceTab">当前标签页</option>
         <option value="system" id="optSourceSystem">系统音频（整个屏幕）</option>
         <option value="mic" id="optSourceMic">麦克风</option>
+        <!-- 桌面助手音源：**常驻显示**（探测不到也看得见，由提示语说明状态）；
+             选中后必须配对成功才能启动 —— 见 panel.ts 的 doStart/detectHelper -->
+        <option value="helper" id="optSourceHelper">桌面助手</option>
       </select>
       <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
     </div>
@@ -503,6 +506,26 @@
   <!-- 麦克风启动失败·模态（两端共用）：getUserMedia 被浏览器直接拒绝时（无设备 /
        系统隐私禁用 / 曾被拒绝）授权框根本不会出现、会话随即收敛，只靠状态栏一行小字
        用户看到的就是"没弹框就闪退"。模态把 micErrorText 映射的具体排查指引顶到眼前。 -->
+  <!-- 桌面助手配对·模态（两端共用）：助手会把本机音频交给连上来的页面，所以首次必须用
+       配对码换取设备令牌（配对码只显示在用户自己启动助手的终端里）。只在用户选了
+       「桌面助手」音源且还没有令牌时弹出。 -->
+  <div class="unsup-mask" id="helperPairModal" hidden>
+    <div class="unsup-card" role="dialog" aria-modal="true" aria-labelledby="helperPairTitleEl">
+      <div class="unsup-head">
+        <svg class="unsup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>
+        <span id="helperPairTitleEl"></span>
+      </div>
+      <p class="unsup-body" id="helperPairBodyEl"></p>
+      <label class="unsup-body" for="helperPairCode" id="helperPairCodeLabel"></label>
+      <input id="helperPairCode" class="helper-pair-input" autocomplete="off" spellcheck="false" maxlength="8" placeholder="ABC-123">
+      <p class="unsup-body" id="helperPairErrEl" hidden></p>
+      <div class="unsup-actions">
+        <button type="button" class="unsup-btn" id="helperPairCancel"></button>
+        <button type="button" class="unsup-btn primary" id="helperPairSubmit"></button>
+      </div>
+    </div>
+  </div>
+
   <div class="unsup-mask" id="micErrModal" hidden>
     <div class="unsup-card" role="alertdialog" aria-modal="true" aria-labelledby="micErrTitleEl">
       <div class="unsup-head">

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 语言读写走平台层 storage：扩展=chrome.storage.local，Web=localStorage。
 // 同一个键名 tmspeech_lang 两端共用，调用方无需关心宿主。
 import { storage } from './platform';
@@ -217,6 +219,25 @@ const strings: Record<string, Record<string, string>> = {
     // —— 麦克风音源（采集在悬浮字幕窗内，PCM 经 bg 转发给 offscreen）——
     // 无「麦克风设备」选择项：设备由 Chrome 授权弹窗选择并记住，扩展内不重复该 UI
     sourceMic: '麦克风',
+    sourceHelper: '桌面助手（系统音频，免授权）',
+    sourceHintHelper: '从本机助手获取系统音频：整机声音都能识别，不用弹屏幕共享选择器、也没有授权框。首次使用需输入助手窗口里显示的 6 位配对码。',
+    sourceHintHelperUnpaired: '已检测到本机助手，但还没配对：点「开始」会弹出配对框，把助手窗口里的 6 位配对码填进去即可（只需一次）。',
+    helperPairTitle: '与桌面助手配对',
+    helperPairBody: '「易字幕本机助手」窗口里有一个 6 位配对码，输入它即可完成配对（只需一次，之后本浏览器长期有效）。',
+    helperPairCodeLabel: '配对码',
+    helperPairSubmit: '配对并开始',
+    helperPairCancel: '取消',
+    helperPairSuccess: '配对成功，正在开始识别…',
+    helperPairErrBadCode: '配对码不正确，请对照助手窗口重新输入',
+    helperPairErrExpired: '配对码已过期，请在助手窗口里重新生成（easysub-helper pair --new）',
+    helperPairErrLocked: '失败次数过多已被临时锁定，请稍后再试',
+    helperPairErrNoCode: '助手当前没有有效配对码，请在助手窗口里查看',
+    helperPairErrGeneric: '配对失败：{m}',
+    helperNotFound: '没有检测到桌面助手',
+    // 助手窗口的「启动/暂停」总开关默认是暂停：这不是故障，是等用户去按一下
+    helperPaused: '桌面助手窗口处于「暂停」：请在助手窗口点「启动」后重试',
+    helperWsClosed: '与桌面助手的连接已断开（重新点「开始」即可；也可确认助手窗口是否还在运行）',
+    helperWsError: '无法连接桌面助手',
     sourceHintMic: '识别麦克风采集到的声音。首次开始识别时会在悬浮字幕窗上弹出 Chrome 授权框（可在其中选择设备，浏览器会记住），字幕显示在悬浮窗。',
     micDenied: '未获得麦克风权限或设备不可用，识别未开始',
     // NotFoundError（系统无可用麦克风 / Windows 隐私设置禁用）时 Chrome 不弹授权框直接拒，
@@ -460,6 +481,24 @@ const strings: Record<string, Record<string, string>> = {
     // No "microphone device" picker: Chrome's permission prompt lets the user choose the
     // device and remembers it, so the extension does not duplicate that UI.
     sourceMic: 'Microphone',
+    sourceHelper: 'Desktop helper (system audio, no picker)',
+    sourceHintHelper: 'Takes system audio from the local helper: whole-machine sound, no screen-sharing picker and no permission dialog. The first start asks for the 6-character pair code shown in the helper window.',
+    sourceHintHelperUnpaired: 'The local helper was detected but this browser is not paired yet: pressing Start opens the pairing box — type the 6-character code shown in the helper window (once).',
+    helperPairTitle: 'Pair with the desktop helper',
+    helperPairBody: 'The EasySub Helper window shows a 6-character pair code. Enter it once — this browser stays paired afterwards.',
+    helperPairCodeLabel: 'Pair code',
+    helperPairSubmit: 'Pair and start',
+    helperPairCancel: 'Cancel',
+    helperPairSuccess: 'Paired, starting recognition…',
+    helperPairErrBadCode: 'Wrong pair code — check the helper window and try again',
+    helperPairErrExpired: 'The pair code expired — generate a new one in the helper window (easysub-helper pair --new)',
+    helperPairErrLocked: 'Too many failed attempts; temporarily locked, try again later',
+    helperPairErrNoCode: 'The helper has no valid pair code right now — check the helper window',
+    helperPairErrGeneric: 'Pairing failed: {m}',
+    helperNotFound: 'Desktop helper not found',
+    helperPaused: 'The desktop helper window is paused — press Start there and try again',
+    helperWsClosed: 'Disconnected from the desktop helper (click Start again; make sure the helper is still running)',
+    helperWsError: 'Cannot connect to the desktop helper',
     sourceHintMic: 'Transcribes what the microphone hears. On the first start, Chrome\'s permission prompt appears on the floating subtitle window (pick your device there — the browser remembers it); subtitles show in the floating window.',
     micDenied: 'Microphone permission denied or device unavailable — recognition not started',
     micNotFound: 'No microphone device detected — recognition not started. Make sure a mic is connected and usable; if it still fails, check that the OS privacy settings allow apps to access the microphone (Windows: Settings → Privacy & security → Microphone).',
