@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 const SAMPLE_RATE = 16000;
 
 export type AudioDataCallback = (samples: Float32Array) => void;

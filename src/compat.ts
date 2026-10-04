@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 浏览器兼容性自检（两端共用：扩展弹窗 + 纯 Web 版面板，首次启动时弹一次）。
 //
 // 背景（用户实测）：Firefox/Safari 等浏览器打开面板后「点开始毫无反应」，排查成本极高。

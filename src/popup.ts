@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 扩展弹窗入口：只负责挂载共享控制面板（src/panel.ts）。
 // 面板 DOM/CSS 与纯 Web 版共用一份模板（src/ui.css + src/ui-body.html），
 // 面板逻辑共用 src/panel.ts，扩展与 Web 的差异全部收在 platform.ts 的宿主判定里。

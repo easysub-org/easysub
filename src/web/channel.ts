@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 面板页 ↔ 字幕浮窗 的跨窗口消息总线（纯 Web 版专用）。
 //
 // 主通道用 **BroadcastChannel**，而不是 window.postMessage/opener：

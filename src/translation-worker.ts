@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 离线翻译 worker：被 offscreen 文档创建，专门跑 transformers.js 推理，
 // 把耗时的句级翻译从主线程（音频泵/ASR 所在线程）隔离出去，不阻塞识别。
 // 模型文件由用户在面板用 <input type=file> 选目录读入 IndexedDB（见 model-db.ts），

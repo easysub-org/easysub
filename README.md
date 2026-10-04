@@ -324,7 +324,38 @@ Offscreen 主线程 ──→ ASR 解码 ──→ 文本
 
 ## 许可证
 
-MIT License © 2026 hcz1017
+Copyright (C) 2026 hcz1017
+
+本项目以 **GNU Affero 通用公共许可证第 3 版或更高版本（AGPL-3.0-or-later）** 发布，全文见
+[LICENSE](LICENSE)。这意味着：
+
+- 你可以自由使用、修改、再分发（包括商用），但**分发修改版必须同样以 AGPL 提供完整源码**；
+- 把修改版当作**网络服务**提供给他人时（例如自己部署一份 Web 版），同样必须向使用者提供对应源码
+  （AGPL 第 13 条）。对应源码即：
+  主仓库 <https://github.com/easysub-org/easysub>、
+  本机助手 <https://github.com/easysub-org/easysub-helper>（独立仓库，同样 AGPL）；
+- 想**闭源**集成/再发布是不允许的；确有此需求请联系作者洽谈商业授权；
+- "易字幕 / EasySub"名称与图标**不在**许可证授权范围内，请勿用于衍生品的品牌。
+
+> **不追溯**：v1.7.3 及之前已按 MIT 发布的版本，那份授权对已获得副本的每个人**永久有效**；
+> 自本次变更起的版本按 AGPL-3.0-or-later 发布。
+
+### 第三方组件
+
+| 组件 | 许可证 | 说明 |
+|---|---|---|
+| [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx/) WASM 运行时 | Apache-2.0 | 与 AGPL-3.0 兼容 |
+| Zipformer 中英双语模型 | Apache-2.0 | 随 Releases 分发 |
+| [onnxruntime-web](https://github.com/microsoft/onnxruntime) | MIT | |
+| [@huggingface/transformers](https://github.com/huggingface/transformers.js) | Apache-2.0 | |
+| [soundcard](https://github.com/bastibe/SoundCard)（助手） | BSD-3-Clause | |
+| [aiohttp](https://github.com/aio-libs/aiohttp)（助手） | Apache-2.0 AND MIT | |
+| [numpy](https://numpy.org/)（助手） | BSD-3-Clause | |
+| [soxr](https://github.com/dofuuz/python-soxr)（助手，**可选**） | **LGPL-2.1-or-later** | 官方二进制**不打包**它，见下 |
+
+助手的高质量重采样是可选的 `soxr`（LGPL）。LGPL 要求使用者能替换该库，而 PyInstaller 单文件
+打包做不到，所以**官方发行包只装 `[capture]`（不含 `quality`）**，重采样退回内置 polyphase FIR——
+需要极致音质时请自行 `pip install "easysub-helper[quality]"`。
 
 ## Star 趋势
 

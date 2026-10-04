@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 纯 Web 版本地预览服务：静态托管 + 跨源隔离响应头。
 //
 // 为什么需要它：sherpa-onnx 的 wasm 是 pthreads 构建，必须处于 crossOriginIsolated

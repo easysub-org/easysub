@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 麦克风采集（跨宿主共用）：16k 单声道定长出块，交调用方决定怎么送给识别引擎。
 //
 // 为什么不是识别引擎自己采：
