@@ -7,6 +7,7 @@
 // 两者"谁来调 getUserMedia"不同，但"怎么采、怎么出块"完全一样，故只抽这一层。
 import { resolveUrl } from './platform';
 import { tSync } from './i18n';
+import { resample } from './audio-processor';
 
 // getUserMedia 失败名 → 用户可读文案（两端共用）。NotAllowedError 之外要特别留意
 // NotFoundError：系统里没有可用麦克风（设备未接 / Windows 隐私设置禁用）时 Chrome
@@ -104,8 +105,15 @@ export class MicCapture {
     }
     if (stale()) { abandon(); return; }
     try {
-      // 强制 16k：下游识别管道直吃，零重采样
-      ctx = new AudioContext({ sampleRate: 16000 });
+      // 坑：这里**不能**强制 16k（曾经的 `new AudioContext({ sampleRate: 16000 })`）：
+      //   - Firefox：`createMediaStreamSource` 在上下文采样率与轨道原生采样率不一致时直接抛
+      //     NotSupportedError（"Connecting AudioNodes from AudioContexts with different
+      //     sample-rate is currently not supported."）——麦克风模式在 FF 上必挂，
+      //     且失败路径是 ERROR → 宿主收敛会话，用户看到的是"点开始就莫名其妙停了"；
+      //   - Chrome：不抛，但同样打这条警告，且 16k 与设备原生（多为 48k）不一致时源节点
+      //     究竟有没有重采样并无保证（静默出不了声）。
+      // 用设备默认采样率最稳：16k 的契约改由**出块口**重采样兑现（见下面 onmessage）。
+      ctx = new AudioContext();
       const src = ctx.createMediaStreamSource(stream);
       await ctx.audioWorklet.addModule(resolveUrl('audio-worklet-processor.js'));
       if (stale()) { abandon(); return; }
@@ -117,9 +125,16 @@ export class MicCapture {
       src.connect(node);
       node.port.onmessage = (ev: MessageEvent) => {
         if (!ev.data?.audio) return;
-        const f32 = new Float32Array(ev.data.audio);
-        if (!f32.length) return;
-        this.opts.onChunk(f32, ev.data.sampleRate || 16000);
+        const raw = new Float32Array(ev.data.audio);
+        if (!raw.length) return;
+        // 本类契约是"16k 单声道出块"（见文件头），但上下文**不再**强制 16k（见上方 AudioContext
+        // 的坑），所以在出块口按实际采样率重采样一次，把契约真正落在这一层：
+        //   · 扩展侧：PCM 要经 floating → bg → offscreen 三跳，且走 Port 的 JSON 结构化克隆
+        //     （Array.from 成普通数组），48k 原样搬会把消息量与序列化开销放大 3 倍；
+        //   · Web 侧：反正也要 resample，放在这里不额外增加一次。
+        // 下游 feedMicChunk 见到 sampleRate=16000 便不再重复重采样。
+        const sr = Number(ev.data.sampleRate) || 16000;
+        this.opts.onChunk(sr === 16000 ? raw : resample(raw, sr, 16000), 16000);
       };
       // pull 模式（pushMs=0）才需要主线程定时催 flush；push 模式下音频线程自己出块，
       // 再挂一条定时器只会把同一次 flush 拆成不齐整的小块（两条路各自清一遍缓冲）。

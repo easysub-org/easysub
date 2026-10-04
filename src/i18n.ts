@@ -207,6 +207,11 @@ const strings: Record<string, Record<string, string>> = {
     sysPickConfirm: '打开选择器',
     sysPickCancel: '取消',
     sourceEnded: '音频来源已结束（停止共享 / 标签页被关闭），识别已停止',
+    // 与 sourceEnded 分开的第二种中断：共享本身还在（用户根本没动过），但音频轨自己结束了
+    // ——Chromium 系统音频环回的已知缺陷（蓝牙耳机切换播放模式时尤甚），见 asr-engine 的
+    // watchCaptureTracks/consumeAdopted。文案要同时覆盖"用户主动停止共享"与"设备/浏览器
+    // 层面中断"两种情况，并给出下一步。
+    sourceAudioTrackLost: '系统音频轨已中断（停止共享，或浏览器/音频设备层面的中断——如蓝牙耳机切换播放模式、被共享的标签页被关闭），识别已停止。请重新点「开始」——模型已加载，重开会很快',
     webPanelLost: '与识别面板的连接已断开（面板页被关闭或崩溃），识别已停止',
     sourceOutsideTip: '想在浏览器之外的软件上用字幕？试试改一下音频来源',
     // —— 麦克风音源（采集在悬浮字幕窗内，PCM 经 bg 转发给 offscreen）——
@@ -448,6 +453,7 @@ const strings: Record<string, Record<string, string>> = {
     sysPickConfirm: 'Open picker',
     sysPickCancel: 'Cancel',
     sourceEnded: 'Audio source ended (sharing stopped / tab closed) — recognition stopped',
+    sourceAudioTrackLost: 'The system-audio track was cut off (sharing stopped, or a browser/audio-device interruption such as a Bluetooth headset switching playback mode, or the shared tab being closed) — recognition stopped. Press Start again; the model is already loaded, so restarting is fast.',
     webPanelLost: 'Lost the connection to the recognition panel (the panel page was closed or crashed) — recognition stopped',
     sourceOutsideTip: 'Want subtitles in apps outside the browser? Try switching the audio source.',
     // —— Microphone source (captured in the floating window, PCM relayed via bg to offscreen) ——

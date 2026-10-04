@@ -158,6 +158,20 @@ export class AsrEngine {
   private fallbackCleanup: (() => void) | null = null;
   private flushTimer: any = null;
 
+  // —— 预取采集流的提前看护（见 adoptCaptureStream 的注释）——
+  // adoptedStream = 已经取到手、但还没接到管道上的那条流；adoptedAudioDead = 它的音频轨
+  // 在接线前就结束了（"装完就已死"）。接线时由 consumeAdopted 认领并判定。
+  private adoptedStream: MediaStream | null = null;
+  private adoptedAudioDead = false;
+  // 已挂过 ended 监听的轨道。adoptCaptureStream 与 pipeCaptureStream 会走到同一批轨道，
+  // 必须幂等，否则同一轨道挂两个监听 → 一次中断上报两条 ERROR。
+  private watchedTracks = new WeakSet<MediaStreamTrack>();
+  // 当前正在喂管道的音源（tab/system）。文案要按它选：tab 音源的轨道结束=来源结束，
+  // 不能报成"系统音频轨中断"。
+  private captureSource: EngineSource = 'tab';
+  // 已经上报过"来源结束"的流：同一条流只收敛一次（多轨同时 ended 时不重复报）。
+  private endedReported = new WeakSet<MediaStream>();
+
   // 会话代次：INIT/STOP 各递增一次，用于作废在途的异步初始化。
   private sessionEpoch = 0;
   private scriptsReady: Promise<void> | null = null;
@@ -803,6 +817,78 @@ export class AsrEngine {
 
   // ================= 音频采集 =================
 
+  // —— 采集流的提前看护 ——
+  // 登记一条"已经拿到手、但还没接到管道上"的采集流，**取到流的那一刻**就挂 ended 监听。
+  //
+  // 坑（Web 版系统音频"启动有概率静默失败 / 莫名其妙收到 STOP"的根因）：
+  // Web 版的屏幕共享流是在用户手势里先取好的（web/panel.ts → web/host.ts 的 preAcquireAudio），
+  // 之后还要穿过「读会话配置 → 建识别器（实测数秒）→ pipeline.start」才在 pipeCaptureStream
+  // 里接线。而 MediaStreamTrack 的 ended **只发一次**：
+  //   ① 音频轨若在这段间隙里就结束了（Chromium 的系统音频环回有"共享仍在、音频轨先 ended"
+  //      的已知缺陷，蓝牙耳机 / 音频设备切换下概率触发），等接线时才挂监听就永远收不到——
+  //      会话以"运行中却永远没有声音"的幽灵态一直挂着，正是用户看到的"静默失败"；
+  //   ② 事件若恰好赶在挂上监听之后才到，又会被当成"用户停止了共享"上报 ERROR，宿主
+  //      （web/host.ts 的 toPanel 对任何 ERROR 都 stopSession）据此收敛整场会话——
+  //      用户什么都没动却"莫名其妙收到 STOP"。
+  // 两种表现同一个根因：轨道生命周期没有从"拿到流"那一刻开始看护。
+  // 这里登记并挂监听，把"音频轨已死"的事实记在 adoptedAudioDead 上，接线时核对它，
+  // 就能把静默失败变成一条说得清的错误。**未接线期间不上报**：那时会话可能还没被受理
+  // （用户正停在模型引导卡上），报错只会打扰人；事实照记，接线时自然会判定。
+  adoptCaptureStream(stream: MediaStream) {
+    if (this.captureStream === stream) return;
+    if (this.adoptedStream !== stream) {
+      this.adoptedStream = stream;
+      this.adoptedAudioDead = false;
+      // 坑："装完就已死"：登记时轨道可能**已经** ended（事件早就发过了，监听挂得再早也
+      // 收不到）。判死活只认音频轨——画面轨是我们主动 stop 的（见 acquireSystemAudioStream），
+      // 它的 readyState 恒为 ended，拿它判会把每一场都误判成死流。
+      const audio = stream.getAudioTracks()[0] ?? null;
+      if (audio && audio.readyState === 'ended') this.adoptedAudioDead = true;
+    }
+    this.watchCaptureTracks(stream);
+  }
+
+  // 给一条采集流的轨道挂 ended 监听（幂等：同一轨道只挂一次；adopt 与接线两条路都会调到）。
+  // 监听体只做三件事：① 记账（音频轨死了，供接线时核对）；② 这条流已经在喂管道时上报
+  // "来源结束"，由宿主收敛会话（原行为）；③ 同一条流只收敛一次（多轨同时 ended 不发两条）。
+  private watchCaptureTracks(stream: MediaStream) {
+    stream.getTracks().forEach((track) => {
+      if (this.watchedTracks.has(track)) return;
+      this.watchedTracks.add(track);
+      // 注意：自己调 track.stop() **不会**触发本事件，所以 stopAudio() 的清理不会误报。
+      track.addEventListener('ended', () => {
+        if (track.kind === 'audio') {
+          if (this.adoptedStream === stream) this.adoptedAudioDead = true;
+          if (this.captureStream !== stream) return; // 还没接线：只记账（见 adoptCaptureStream）
+          this.reportSourceEnded(stream, 'sourceAudioTrackLost', '音频轨已结束，上报停止');
+          return;
+        }
+        // 画面轨：system 模式下它由我们主动 stop（主动 stop 不触发本事件）；tab 音源没有
+        // 画面轨。真走到这里只可能是被捕获的屏幕/窗口被关闭 —— 沿用"来源已结束"文案。
+        if (this.captureStream !== stream) return;
+        this.reportSourceEnded(stream, 'sourceEnded', '画面轨已结束，上报停止');
+      });
+    });
+  }
+
+  // "来源结束"的统一上报口：同一条流只发一次（音+画同时 ended 时不重复报），
+  // 文案按音源选——tab 音源的轨道结束就是"标签页/共享结束"，别报成"系统音频轨中断"。
+  private reportSourceEnded(stream: MediaStream, key: 'sourceEnded' | 'sourceAudioTrackLost', logMsg: string) {
+    if (this.endedReported.has(stream)) return;
+    this.endedReported.add(stream);
+    const useKey = key === 'sourceAudioTrackLost' && this.captureSource !== 'system' ? 'sourceEnded' : key;
+    this.log(logMsg);
+    this.sink.toPanel({ type: 'ERROR', message: tSync(this.currentLang, useKey) });
+  }
+
+  // 接线时认领提前看护的记账，返回"这条流的音频轨在接入管道前是否已经死了"。
+  private consumeAdopted(stream: MediaStream): boolean {
+    const dead = (this.adoptedStream === stream && this.adoptedAudioDead)
+      || stream.getAudioTracks()[0]?.readyState === 'ended';
+    if (this.adoptedStream === stream) { this.adoptedStream = null; this.adoptedAudioDead = false; }
+    return dead;
+  }
+
   stopAudio() {
     if (this.flushTimer) { clearTimeout(this.flushTimer); this.flushTimer = null; }
     if (this.workletNode) { this.workletNode.port.postMessage('stop'); this.workletNode.disconnect(); this.workletNode = null; }
@@ -841,7 +927,12 @@ export class AsrEngine {
     media.getVideoTracks().forEach((t) => t.stop());
     const audio = media.getAudioTracks()[0];
     if (!audio) throw new Error('未获取到系统音频轨道');
-    return new MediaStream([audio]);
+    const out = new MediaStream([audio]);
+    // 坑：取到流的那一刻就交给引擎看护（见 adoptCaptureStream）。Web 版这条流要跨过
+    // 模型加载/建识别器才接线（数秒），这期间音频轨的 ended 事件必须有人接着，否则
+    // 事件一丢就是"运行中却永远没声音"，等接线时才挂监听已经晚了。
+    this.adoptCaptureStream(out);
+    return out;
   }
 
   // 麦克风：Chrome 禁止扩展 offscreen 文档做 getUserMedia 音频采集，扩展侧由可见页采集后
@@ -858,23 +949,37 @@ export class AsrEngine {
   }
 
   async pipeCaptureStream(stream: MediaStream, source: EngineSource) {
+    // 坑：同一条流被重复投递时直接早退。否则下面的 stopAudio() 会把"上一份采集"——也就是
+    // 它自己的轨道——主动 stop 掉（主动 stop 不触发 ended，全程没有任何报错），随后又照常
+    // 建 worklet，留下"运行中却永远没声音"的幽灵会话。adoptCaptureStream 开头有同样的守卫。
+    if (this.captureStream === stream) return;
+    // 先认领提前看护（见 adoptCaptureStream）：从"取到流"到"接上管道"之间隔着读会话配置、
+    // 建识别器（实测数秒）等步骤，音频轨可能早就结束了；不核对就会挂成一场没有声音的
+    // 幽灵会话（界面运行中、永远不出字幕）。
+    const audioDeadBeforePipe = this.consumeAdopted(stream);
     // 坑：换流前必须先释放上一份采集。INIT 有两条投递路径（bg 的 checkPendingInit 与直投），
     // 同一次启动可能触发两次，两条 async 链会各自走到这里 —— 不先停机就会出现两个
     // AudioContext 并存：旧的从不 close（Chrome 单文档 AudioContext 有数量上限），
     // 旧 worklet 的缓冲只进不出，约 192KB/s 无上限增长，长会话必 OOM。
     this.stopAudio();
     this.captureStream = stream;
+    this.captureSource = source;
     // 坑：此前完全没有 track ended 检测。system 模式用户点"停止共享"、被捕获标签页被关闭、
     // 音频设备拔出时，MediaStreamAudioSourceNode 只会输出静音 —— worklet 照常送全零帧，
     // pipeline 保持 Running，界面"正常"但永远不会再出字幕，且没有任何错误提示。
-    stream.getTracks().forEach((track) => {
-      // 注意：自己调 track.stop() 不会触发本事件，所以上面的 stopAudio() 不会误报。
-      track.addEventListener('ended', () => {
-        if (this.captureStream !== stream) return;
-        this.log('音频轨道已结束，上报停止');
-        this.sink.toPanel({ type: 'ERROR', message: tSync(this.currentLang, 'sourceEnded') });
-      });
-    });
+    // 现在统一由 watchCaptureTracks 挂监听（与 adoptCaptureStream 共用、幂等），并把
+    // "音频轨丢失"与"画面轨/来源被关"分成两条文案上报。
+    this.watchCaptureTracks(stream);
+    // 坑：监听挂得再早也救不回"事件已经发过"的情况（ended 只发一次）。接线前就已经死掉的
+    // 流必须在这里就地判掉：否则 worklet 会开出一条只送全零帧的采集，界面停在"识别中"、
+    // 一个字都不出，用户只能靠刷新页面自救 —— 这正是"系统音频启动有概率静默失败"。
+    // 判掉时给的是"轨道中断"的文案（而不是旧的"停止共享/标签页被关闭"），并把用户能做的
+    // 下一步（重新点开始，此时模型已常驻预热，重开很快）说清楚。
+    if (audioDeadBeforePipe) {
+      this.reportSourceEnded(stream, 'sourceAudioTrackLost', '音频轨在接入管道前已结束（浏览器/音频设备层面的中断），不再挂一场没有声音的会话');
+      this.sink.requestStop();
+      return;
+    }
     // 坑：tab 模式必须建 <audio> 回放——被捕获标签页的声音经捕获流转发，不回放就是静音；
     // system 模式是系统环回（loopback），原声照常出扬声器，回放反而造成回声，绝不能开；
     // mic 模式同理——回放麦克风=外放回声啸叫，也绝不能开。
@@ -985,12 +1090,12 @@ export class AsrEngine {
   }
 
   private startFallbackCapture(stream: MediaStream) {
-    let ctx: AudioContext;
-    try {
-      ctx = new AudioContext({ sampleRate: 16000 });
-    } catch {
-      ctx = new AudioContext();
-    }
+    // 坑（同 mic-capture 的去 16k 改动）：不能强制 `new AudioContext({ sampleRate: 16000 })`。
+    // Firefox 在 createMediaStreamSource 发现上下文采样率与轨道原生采样率不一致时直接抛
+    // NotSupportedError（"Connecting AudioNodes from AudioContexts with different sample-rate
+    // is currently not supported."），系统音频一旦降级到这条路径就必挂；Chrome 只告警，
+    // 但源节点是否真的重采样没有保证（静默无声）。下面本来就按 ctx.sampleRate 重采样到 16k。
+    const ctx = new AudioContext();
     this.audioCtx = ctx;
     const source = ctx.createMediaStreamSource(stream);
     const node = ctx.createScriptProcessor(16384, 1, 1);
