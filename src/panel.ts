@@ -21,6 +21,7 @@ import { initCompatCheck, openCompatCheck } from './compat';
 // 本机助手（桌面端）：探测 → 配对 → 从桌面端取 16k PCM。产品纪律见 src/helper.ts 文件头。
 import {
   HelperInfo, HelperSession, helperErrorMessage, loadHelperSession, pairHelper, probeHelper, saveHelperSession,
+  HELPER_RELEASES_URL,
 } from './helper';
 
 const $ = (id: string) => document.getElementById(id)!;
@@ -591,7 +592,15 @@ function updateSourceHint() {
       else if (!helperSession) key = 'sourceHintHelperUnpaired';
       else key = 'sourceHintHelper';
     }
-    sourceHintEl.textContent = tSync(currentLang, key);
+    // 助手音源是**实验性**的：提示里附上助手仓库的 Releases 地址（还没装 / 想升级的人
+    // 直接点过去）。用 DOM 拼 <a> 而不是 innerHTML —— 文案来自 i18n，不该被当 HTML 解析。
+    sourceHintEl.textContent = tSync(currentLang, key) + ' ' + tSync(currentLang, 'helperReleases') + ' ';
+    const helperLink = document.createElement('a');
+    helperLink.href = HELPER_RELEASES_URL;
+    helperLink.target = '_blank';
+    helperLink.rel = 'noopener';
+    helperLink.textContent = HELPER_RELEASES_URL;
+    sourceHintEl.appendChild(helperLink);
     sourceHintEl.hidden = false;
     return;
   }

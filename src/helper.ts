@@ -27,6 +27,9 @@ export const HELPER_PORT_SCAN = 20;
 //: （用户实测吐槽过）。完整扫描留给"用户主动选了这个音源 / 点了开始"的时刻。
 export const HELPER_PROBE_QUICK_PORTS = 2;
 export const HELPER_SAMPLE_RATE = 16000;
+//: 助手仓库的 Releases 页：面板切到「桌面助手」音源时会把地址附在提示里
+//: （还没装助手 / 想更新的人可以直接点过去）。助手是独立仓库。
+export const HELPER_RELEASES_URL = 'https://github.com/easysub-org/easysub-helper/releases';
 
 const SESSION_KEY = 'helperSession';
 const PROBE_TIMEOUT_MS = 700;

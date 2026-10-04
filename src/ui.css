@@ -285,6 +285,8 @@ body.anim .container.loaded > :nth-child(8) { transition-delay: 280ms; }
 .source-hint {
   margin-top: 5px; font-size: 10.5px; line-height: 1.5; color: var(--text2);
 }
+/* 提示里的链接（目前只有"助手仓库 Releases"一处）：可点、能换行，不撑破弹窗 */
+.source-hint a { color: var(--accent); text-decoration: underline; word-break: break-all; }
 /* 常驻引导提示：跳出浏览器使用的发现入口。与音源状态无关、永远可见，
    视觉沿用普通音源提示（不抢眼，只需用户扫到即可） */
 .source-tip {
