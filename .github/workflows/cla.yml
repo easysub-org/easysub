@@ -1,0 +1,103 @@
+name: cla
+
+# CLA 检查：PR 里出现签署语句 → 打 cla-signed；否则提醒签并把 PR 挂在 cla-pending。
+#
+# 安全说明：用 pull_request_target 才能对 fork 来的 PR 有写权限（打标签/发评论），
+# 因此本工作流**绝不 checkout、绝不执行 PR 里的任何代码**，只用 GitHub API 读 PR 元信息与评论。
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  check:
+    name: CLA
+    runs-on: ubuntu-latest
+    # issue_comment 也会在普通 issue 上触发，这里只处理 PR
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request != null
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // 与 CLA.md 第 9 条完全一致的一句（归一化空白/大小写后比对）
+            const PHRASE = 'i have read the cla document and i hereby sign the cla';
+            const SIGNED = 'cla-signed';
+            const PENDING = 'cla-pending';
+            const REMINDER_MARK = '<!-- cla-bot:reminder -->';
+            const CONFIRM_MARK = '<!-- cla-bot:confirmed -->';
+
+            // 维护者与机器人不需要签（换人维护时把新 ID 加进来）
+            const BYPASS = new Set(['hcz1017', 'dependabot[bot]', 'github-actions[bot]']);
+            const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ');
+
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request?.number ?? context.issue.number;
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+            const author = pr.user.login;
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              }
+            }
+            const removeLabel = async (name) => {
+              try { await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name }); }
+              catch (e) { /* 本来就没有 */ }
+            };
+
+            if (BYPASS.has(author)) {
+              core.info(`${author} 在免签名单里，跳过`);
+              return;
+            }
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
+            const signed = comments.some(
+              (c) => c.user.login === author && norm(c.body).includes(PHRASE));
+            const labels = pr.labels.map((l) => l.name);
+
+            if (signed) {
+              if (!labels.includes(SIGNED)) {
+                await ensureLabel(SIGNED, '0e8a16', 'CLA 已签署');
+                await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: [SIGNED] });
+              }
+              await removeLabel(PENDING);
+              // 只在"刚签上"的那一刻回一句话，避免每次 push 都刷评论
+              const already = comments.some(
+                (c) => c.user.login === 'github-actions[bot]' && (c.body || '').includes(CONFIRM_MARK));
+              if (!already) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: number,
+                  body: `${CONFIRM_MARK}\n✅ 收到，CLA 已签署（${author}）。谢谢！\n\n` +
+                        `Thanks — your CLA signature is recorded.`,
+                });
+              }
+              core.info('CLA 已签署');
+              return;
+            }
+
+            // 没签：打标记 + 提醒一次
+            if (!labels.includes(PENDING)) {
+              await ensureLabel(PENDING, 'd93f0b', '等待签署 CLA');
+              await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: [PENDING] });
+            }
+            const reminded = comments.some(
+              (c) => c.user.login === 'github-actions[bot]' && (c.body || '').includes(REMINDER_MARK));
+            if (!reminded) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number,
+                body: `${REMINDER_MARK}\n@${author} 合并前需要先签一下 CLA（你**保留**自己贡献的版权）。\n\n` +
+                      `在你的 PR 里发一条评论，内容照抄：\n\n` +
+                      `> I have read the CLA Document and I hereby sign the CLA.\n\n` +
+                      `协议全文见 [CLA.md](../blob/HEAD/CLA.md)，说明见 [CONTRIBUTING.md](../blob/HEAD/CONTRIBUTING.md)。`,
+              });
+            }
+            core.info('CLA 未签署，已挂 cla-pending');

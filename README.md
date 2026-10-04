@@ -315,6 +315,18 @@ Offscreen 主线程 ──→ ASR 解码 ──→ 文本
 - **标点模型加载失败** → 纯规则标点（正则 + 上下文判断）
 - **MediaStreamTrack 不可转移** → 已确认不可行，AudioWorklet 是正式方案
 
+## 贡献
+
+欢迎 issue 与 PR。**提代码 PR 前请先签 [CLA](CLA.md)**：在你的 PR 里发一条评论，内容照抄
+
+> I have read the CLA Document and I hereby sign the CLA.
+
+即可 —— 你**保留**自己贡献的版权，项目所有者获得"可按任意许可证（含商业许可）再许可"的权利
+（`cla` 工作流会自动打标签）。其余约定见 [CONTRIBUTING.md](CONTRIBUTING.md)：本地检查命令、
+领域边界（助手是独立仓库、音频契约固定 16k/20ms）、以及 **所有用户可见文案必须中英双语**。
+
+安全问题请走 GitHub 的 **Security → Report a vulnerability**，不要开公开 issue。
+
 ## 鸣谢
 
 - [Loser123zbx](https://github.com/Loser123zbx) — Logo 设计
