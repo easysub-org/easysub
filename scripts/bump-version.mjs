@@ -121,8 +121,15 @@ function check() {
       if (Number(p) > 65535) problems.push(`manifest.json 的 version "${num}" 段 "${p}" 超过 65535`);
     });
   }
-  if (manifest.version_name !== undefined && !/^\d+\.\d+\.\d+(beta\.\d+)?$/.test(String(manifest.version_name))) {
-    problems.push(`manifest.json 的 version_name "${manifest.version_name}" 不是 ${ACCEPTED}`);
+  if (manifest.version_name !== undefined) {
+    const vn = String(manifest.version_name);
+    if (!/^\d+\.\d+\.\d+beta\.\d+$/.test(vn)) {
+      problems.push(`manifest.json 的 version_name "${vn}" 不是 ${ACCEPTED}`);
+    } else {
+      // version_name 与 version 必须是同一次发版的两种写法（beta 序号对得上），不许混搭
+      const want = vn.replace(/beta\.(\d+)$/, ".$1");          // 1.8.0beta.1 → 1.8.0.1
+      if (want !== num) problems.push(`version_name "${vn}" 与 manifest.version "${num}" 不是同一次发版`);
+    }
   }
   if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(String(pkg.version || ''))) {
     problems.push(`package.json 的 version "${pkg.version}" 不是合法 semver`);

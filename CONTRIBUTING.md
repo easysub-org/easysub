@@ -32,6 +32,13 @@
 > 为什么不靠 GitHub 默认规则：默认的 "inbound = outbound" 只让项目按**当时那份许可证**使用你的
 > 贡献，不包含「换成别的许可证」的权利。细节见 CLA.md 第 2 条。
 
+⚠️ **开了分支保护后**：`cla.yml` 会用 `github-actions[bot]` 直接把签名写进默认分支的
+`signatures/cla.json`。如果你勾了"必须走 PR"却没豁免这个 bot，落库会失败 → CLA 检查红。
+处理：在保护规则里允许 `github-actions[bot]` 绕过，或把落库改成 PR 方式（需要改 cla.yml）。
+
+> Windows 官方产物**未做代码签名**：SmartScreen 首次运行会拦（选"仍要运行"即可）。要消除
+> 提示需要代码签名证书，目前未购买。
+
 ## 二、提 PR 的小约定
 
 - **一个 PR 做一件事**，标题写清影响面。提交信息风格：`feat(scope): …` / `fix(scope): …`（中文正文）。
