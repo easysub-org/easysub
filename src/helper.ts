@@ -8,7 +8,8 @@
 // monitor / macOS Core Audio tap），再把定长 20ms PCM 帧经 ws://127.0.0.1 推过来。
 //
 // 交互纪律（产品要求，别改）：
-//   ① **先探测**：`probeHelper()` 成功才把「桌面助手」这个音源显示出来；
+//   ① **音源常驻显示**，探测结果只决定"能不能启动"与提示语（早期"探测到才显示"已废弃：
+//      用户实测在 Web 版里因此找不到这个音源，连怎么配对都无从下手）；
 //   ② **配对后才可用**：助手会把本机音频交给任何连上来的页面，所以首次必须用配对码
 //      换取设备令牌（配对码只显示在用户自己启动助手的终端里 = 用户在场的证明）；
 //   ③ 令牌存平台 storage（扩展=chrome.storage.local，Web=localStorage），
@@ -119,25 +120,43 @@ async function storedPort(): Promise<number | undefined> {
  * 助手刚好没开时会在控制台刷一片 ERR_CONNECTION_REFUSED（用户实测吐槽过）。
  * 用户主动选「桌面助手」或点「开始」时用 `full=true`，这时才值得为端口漂移找一遍。
  */
-export async function probeHelper(opts: { full?: boolean } = {}): Promise<HelperInfo | null> {
+/**
+ * 探测**单个**端口，分两步：
+ *   ① 不带令牌问一次，确认"这确实是助手"（`/api/pair/info` 本就不需要鉴权）；
+ *   ② 确认之后**才**带 `?token=` 复探，拿这个浏览器是否配过的准确答案。
+ *
+ * 为什么要分两步：探测会扫最多 21 个端口，若一上来就带令牌，本机任意占用这些端口的进程
+ * 都能拿到"可以换本机音频流"的令牌 —— 暴露面从 1 个端口扩到 21 个。
+ * 令牌走 query 而非 `X-Easysub-Token` 头：query 是"简单请求"不触发 CORS 预检，
+ * 而助手的 /api/pair/info 没有预检处理（自定义头会被浏览器直接拦掉）。
+ */
+async function probePort(port: number, token?: string): Promise<HelperInfo | null> {
+  const url = `${helperBaseUrl(port)}/api/pair/info`;
+  const first = await fetchJson(url, undefined, PROBE_TIMEOUT_MS).catch(() => null);
+  // /api/pair/info 无鉴权且必定 200；拿到 __status 说明被拒（CORS/其它服务），不算助手
+  if (!first || first.__status || first.app !== 'easysub-helper') return null;
+  let data = first;
+  if (token) {
+    const withToken = await fetchJson(`${url}?token=${encodeURIComponent(token)}`, undefined,
+      PROBE_TIMEOUT_MS).catch(() => null);
+    if (withToken && !withToken.__status) data = withToken;
+  }
+  return {
+    port,
+    version: String(data.version || ''),
+    paired: data.paired === true,
+    paused: data.paused === true,
+    lang: String(data.lang || ''),
+    platform: String(data.platform || ''),
+  };
+}
+
+export async function probeHelper(opts: { full?: boolean; token?: string } = {}): Promise<HelperInfo | null> {
   const ports = helperPorts(await storedPort(), opts.full === true);
-  const attempts = ports.map((port) =>
-    fetchJson(`${helperBaseUrl(port)}/api/pair/info`, undefined, PROBE_TIMEOUT_MS)
-      .then((data): HelperInfo | null => {
-        // /api/pair/info 无鉴权且必定 200；拿到 __status 说明被拒（CORS/其它服务），不算助手
-        if (!data || data.__status || data.app !== 'easysub-helper') return null;
-        return {
-          port,
-          version: String(data.version || ''),
-          paired: data.paired === true,
-          paused: data.paused === true,
-          lang: String(data.lang || ''),
-          platform: String(data.platform || ''),
-        };
-      })
-      .catch(() => null),
-  );
-  const results = await Promise.all(attempts);
+  // 带令牌探测是**必须**的：助手侧 `paired` 的语义是"本次请求带的令牌是否有效"
+  // （server.py handle_pair_info + _token_from_request），不带令牌恒为 false —— 那样每次打开
+  // 面板都会被当成"没配对过"，逼用户重输配对码，"只配一次"的承诺直接失效。
+  const results = await Promise.all(ports.map((port) => probePort(port, opts.token)));
   const found = results.filter((x): x is HelperInfo => !!x);
   if (!found.length) return null;
   // 优先"已配对"的那一个（多开助手/换端口时更符合用户预期）
@@ -185,7 +204,11 @@ export async function pairHelper(port: number, code: string, label?: string): Pr
 export function helperErrorKey(code: string): string {
   switch (code) {
     case 'bad_code': return 'helperPairErrBadCode';
-    case 'code_expired': return 'helperPairErrExpired';
+    // pairHelper 连不上助手时返回的哨兵码（message 为空）——给一句人话，别把 failed 抛给用户
+    case 'failed': return 'helperPairErrNetwork';
+    // 助手现在发 code_expired；`expired` 是旧版本发的，留着兜底
+    case 'code_expired':
+    case 'expired': return 'helperPairErrExpired';
     case 'locked': return 'helperPairErrLocked';
     case 'no_code': return 'helperPairErrNoCode';
     // 助手窗口的「启动/暂停」总开关处于暂停（默认）：不是错误，是等用户去按启动
@@ -194,9 +217,19 @@ export function helperErrorKey(code: string): string {
   }
 }
 
+//: 配对阶段才会出现的 code；其它（capture_failed / backend_unavailable / resample_unavailable …）
+//: 都是**运行期**错误，不能再套"配对失败"的文案 —— 那会把用户引去重新配对。
+const PAIRING_CODES = ['bad_code', 'code_expired', 'expired', 'locked', 'no_code',
+                       'failed', 'forbidden', 'not_paired'];
+
 export function helperErrorMessage(code: string, fallback: string, lang: string): string {
+  const language = lang || 'zh_CN';
+  if (code !== 'paused' && PAIRING_CODES.indexOf(code) < 0) {
+    // 运行期错误：用通用的「错误：{m}」，让助手给的 message 说话
+    return tSync(language, 'errorPrefix').replace('{m}', fallback || code);
+  }
   const key = helperErrorKey(code);
-  const text = tSync(lang || 'zh_CN', key);
+  const text = tSync(language, key);
   if (text.indexOf('{m}') >= 0) return text.replace('{m}', fallback || '');
   return text || fallback || '';
 }

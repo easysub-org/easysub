@@ -503,12 +503,9 @@
     </div>
   </div>
 
-  <!-- 麦克风启动失败·模态（两端共用）：getUserMedia 被浏览器直接拒绝时（无设备 /
-       系统隐私禁用 / 曾被拒绝）授权框根本不会出现、会话随即收敛，只靠状态栏一行小字
-       用户看到的就是"没弹框就闪退"。模态把 micErrorText 映射的具体排查指引顶到眼前。 -->
-  <!-- 桌面助手配对·模态（两端共用）：助手会把本机音频交给连上来的页面，所以首次必须用
-       配对码换取设备令牌（配对码只显示在用户自己启动助手的终端里）。只在用户选了
-       「桌面助手」音源且还没有令牌时弹出。 -->
+  <!-- 桌面助手配对·模态（两端共用）：助手会把本机音频交给任何连上来的页面，所以首次必须用
+       配对码换取设备令牌（配对码只显示在用户自己启动的助手窗口里，= 用户在场的证明）。
+       音源本身是常驻显示的，这个模态只在"选了助手音源 + 本浏览器还没有令牌"时弹出。 -->
   <div class="unsup-mask" id="helperPairModal" hidden>
     <div class="unsup-card" role="dialog" aria-modal="true" aria-labelledby="helperPairTitleEl">
       <div class="unsup-head">
@@ -526,6 +523,9 @@
     </div>
   </div>
 
+  <!-- 麦克风启动失败·模态（两端共用）：getUserMedia 被浏览器直接拒绝时（无设备 /
+       系统隐私禁用 / 曾被拒绝）授权框根本不会出现、会话随即收敛，只靠状态栏一行小字
+       用户看到的就是"没弹框就闪退"。模态把 micErrorText 映射的具体排查指引顶到眼前。 -->
   <div class="unsup-mask" id="micErrModal" hidden>
     <div class="unsup-card" role="alertdialog" aria-modal="true" aria-labelledby="micErrTitleEl">
       <div class="unsup-head">

@@ -219,7 +219,7 @@ const strings: Record<string, Record<string, string>> = {
     // —— 麦克风音源（采集在悬浮字幕窗内，PCM 经 bg 转发给 offscreen）——
     // 无「麦克风设备」选择项：设备由 Chrome 授权弹窗选择并记住，扩展内不重复该 UI
     sourceMic: '麦克风',
-    sourceHelper: '桌面助手（实验性，系统音频免授权）',
+    sourceHelper: '桌面助手（实验性）',
     helperReleases: '本机助手是独立程序（实验性），下载/更新在这里：',
     sourceHintHelper: '从本机助手获取系统音频：整机声音都能识别，不用弹屏幕共享选择器、也没有授权框。首次使用需输入助手窗口里显示的 6 位配对码。',
     sourceHintHelperUnpaired: '已检测到本机助手，但还没配对：点「开始」会弹出配对框，把助手窗口里的 6 位配对码填进去即可（只需一次）。',
@@ -230,10 +230,11 @@ const strings: Record<string, Record<string, string>> = {
     helperPairCancel: '取消',
     helperPairSuccess: '配对成功，正在开始识别…',
     helperPairErrBadCode: '配对码不正确，请对照助手窗口重新输入',
-    helperPairErrExpired: '配对码已过期，请在助手窗口里重新生成（easysub-helper pair --new）',
+    helperPairErrExpired: '配对码已过期，请在助手窗口点「换一个」重新生成',
     helperPairErrLocked: '失败次数过多已被临时锁定，请稍后再试',
     helperPairErrNoCode: '助手当前没有有效配对码，请在助手窗口里查看',
     helperPairErrGeneric: '配对失败：{m}',
+    helperPairErrNetwork: '连不上桌面助手，请确认它已启动（助手窗口里应显示「正在监听」）',
     helperNotFound: '没有检测到桌面助手',
     // 助手窗口的「启动/暂停」总开关默认是暂停：这不是故障，是等用户去按一下
     helperPaused: '桌面助手窗口处于「暂停」：请在助手窗口点「启动」后重试',
@@ -482,7 +483,7 @@ const strings: Record<string, Record<string, string>> = {
     // No "microphone device" picker: Chrome's permission prompt lets the user choose the
     // device and remembers it, so the extension does not duplicate that UI.
     sourceMic: 'Microphone',
-    sourceHelper: 'Desktop helper (experimental, system audio, no picker)',
+    sourceHelper: 'Desktop helper (experimental)',
     helperReleases: 'The helper is a separate program (experimental) — download or update it here:',
     sourceHintHelper: 'Takes system audio from the local helper: whole-machine sound, no screen-sharing picker and no permission dialog. The first start asks for the 6-character pair code shown in the helper window.',
     sourceHintHelperUnpaired: 'The local helper was detected but this browser is not paired yet: pressing Start opens the pairing box — type the 6-character code shown in the helper window (once).',
@@ -493,10 +494,11 @@ const strings: Record<string, Record<string, string>> = {
     helperPairCancel: 'Cancel',
     helperPairSuccess: 'Paired, starting recognition…',
     helperPairErrBadCode: 'Wrong pair code — check the helper window and try again',
-    helperPairErrExpired: 'The pair code expired — generate a new one in the helper window (easysub-helper pair --new)',
+    helperPairErrExpired: 'The pair code expired — click "New code" in the helper window to get a new one',
     helperPairErrLocked: 'Too many failed attempts; temporarily locked, try again later',
     helperPairErrNoCode: 'The helper has no valid pair code right now — check the helper window',
     helperPairErrGeneric: 'Pairing failed: {m}',
+    helperPairErrNetwork: 'Cannot reach the desktop helper — make sure it is running (its window should say "listening")',
     helperNotFound: 'Desktop helper not found',
     helperPaused: 'The desktop helper window is paused — press Start there and try again',
     helperWsClosed: 'Disconnected from the desktop helper (click Start again; make sure the helper is still running)',

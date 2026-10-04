@@ -19,6 +19,9 @@ import { HelperSource } from './helper';
 import { tSync } from './i18n';
 
 let port: chrome.runtime.Port;
+//: 会话代次：INIT/STOP 都会 +1。用来让"还在飞的 engine.init() 回调"作废 ——
+//: 用户可能在 init 期间就点了停止，那时再把 WS 接上只会留一条没人读的连接。
+let sessionGeneration = 0;
 
 const engine = new AsrEngine({
   resolveUrl: (p) => chrome.runtime.getURL(p),
@@ -84,8 +87,9 @@ function setupPort() {
   myPort.onMessage.addListener((msg: any) => {
     try {
       switch (msg?.type) {
-        case 'INIT_OFFSCREEN':
-          void engine.init({
+        case 'INIT_OFFSCREEN': {
+          const generation = ++sessionGeneration;
+          const initDone = engine.init({
             source: msg.source === 'system' ? 'system'
               : msg.source === 'mic' ? 'mic'
               : msg.source === 'helper' ? 'helper' : 'tab',
@@ -102,9 +106,21 @@ function setupPort() {
           });
           // 桌面助手：PCM 由本机助手进程采集，经 WS 直接喂进引擎。
           // 与 mic 的区别：不需要可见页（没有授权框）、不需要 bg 逐块转发（WS 就在本进程里）。
-          if (msg.source === 'helper') startHelperSource(msg.helperPort, msg.helperToken, msg.lang);
+          // **必须在 init 完成之后再接**：init 未完成时 Pipeline 还没进入 Running，
+          // feedAudio 会直接丢弃，表现为"按下开始后的头几个字没了"。Web 宿主就是这么做的。
+          if (msg.source === 'helper') {
+            void initDone
+              .then(() => {
+                // init 期间用户可能已经点了停止（或又开了一场）：代次变了就放弃，别接音频
+                if (generation !== sessionGeneration) return;
+                startHelperSource(msg.helperPort, msg.helperToken, msg.lang);
+              })
+              .catch(() => { /* init 失败内部只 log 不上抛；这里兜底避免未处理的拒绝 */ });
+          }
           break;
+        }
         case 'STOP_OFFSCREEN':
+          sessionGeneration += 1;          // 作废在飞的 init 回调
           stopHelperSource();
           engine.stop();
           break;

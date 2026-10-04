@@ -131,10 +131,13 @@ function getEngine(): AsrEngine {
 
 // 桌面助手音频源：WS 由本宿主持有（面板页就是引擎宿主），PCM 直接喂进识别管道。
 // 令牌从 storage 读——面板配对成功后会写进去，这里不重复探测（避免两处状态不一致）。
-async function startHelperSource() {
+async function startHelperSource(isStale: () => boolean) {
   helper?.stop();
   helper = null;
   const session = await loadHelperSession();
+  // 加载期间用户可能已经点了停止：stopSession() 那时只 stop 了「当时的 helper」（还是 null），
+  // 这里必须再查一次代次，否则会留下一条没人关闭的 WS（助手会一直推流）。
+  if (isStale()) return;
   if (!session) {
     emitToPanel({ type: 'ERROR', message: tSync(msgLang, 'helperNotFound') });
     stopSession();
@@ -312,8 +315,10 @@ async function startSession(msg: any) {
         // 不再自己调 getDisplayMedia（那时已不在用户手势内，必失败）
         preStream,
       });
-      // 桌面助手：init 之后才接音频（此前 feedMicChunk 没有管道，块会被丢弃）
-      if (source === 'helper') void startHelperSource();
+      // 桌面助手：init 之后才接音频（此前 feedMicChunk 没有管道，块会被丢弃）。
+      // stale() 必须**再查一次**：加载模型期间用户可能已经点了停止，迟到的
+      // startHelperSource 会开出一条没人负责关的 WS（助手会一直推流）。
+      if (source === 'helper' && !stale()) void startHelperSource(stale);
     } catch (e: any) {
       // 这条 catch 是防御性的（引擎 init 内部各失败路只 log 不上抛），但真走到时
       // preStream 也必须释放，否则屏幕共享指示灯为一场不存在的会话常亮。

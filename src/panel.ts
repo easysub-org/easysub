@@ -132,7 +132,8 @@ micErrOk.onclick = () => { micErrModal.hidden = true; };
 micErrModal.onclick = (e) => { if (e.target === micErrModal) micErrModal.hidden = true; };
 
 // —— 桌面助手·配对（两端共用）——
-// 产品要求（别改）：**探测到助手才显示这个音源**；且**配对成功后才可用**。
+// 产品决定（2026-10-05 修正）：音源**常驻显示**（探测结果只决定"能不能启动"与提示语；
+// 早期"探测到才显示"已废弃 —— 用户实测在 Web 版里因此找不到这个音源）；**配对成功才允许启动**。
 // 助手会把本机音频交给任何连上来的页面，所以配对码只显示在用户自己启动的助手窗口里，
 // 它就是"用户在场"的证明；配对成功后换长期设备令牌，之后不再打扰用户。
 let helperInfo: HelperInfo | null = null;
@@ -211,9 +212,15 @@ async function detectHelper(full = false) {
   helperSession = null;
   // full=false：面板打开时只探开头几个端口（别在控制台刷 20 条失败请求）；
   // 用户选了「桌面助手」或点了「开始」时用 full=true 全扫一遍（助手可能漂移到后面的端口）。
-  try { helperInfo = await probeHelper({ full }); } catch { helperInfo = null; }
-  // 探测时带上已存令牌：助手回 paired=true 才说明这个浏览器仍然有效
-  if (helperInfo?.paired && saved && saved.port === helperInfo.port) helperSession = saved;
+  try { helperInfo = await probeHelper({ full, token: saved?.token }); } catch { helperInfo = null; }
+  // 带上已存令牌探测：助手回 paired=true 才说明这个浏览器配过（B1：以前不带令牌，
+  // 于是 paired 恒为 false，"只需配对一次"直接失效）。
+  // 端口以**探测到的**为准：助手重启可能漂移端口，令牌与端口无关，不该因此把有效令牌丢掉；
+  // 顺手写回 storage，让存储端口跟上（storedPort() 下次直接命中）。
+  if (helperInfo?.paired && saved) {
+    helperSession = { ...saved, port: helperInfo.port };
+    void saveHelperSession(helperSession);
+  }
   updateSourceHint();
 }
 
@@ -1200,9 +1207,11 @@ async function doStart(): Promise<void> {
   // 桌面助手音源：**必须先配对**（配对码换来的设备令牌是助手认这个页面的唯一凭据）。
   // 未配对 → 弹配对模态；用户提交成功后由 continuation 重新走一遍 doStart。
   // 位置刻意排在"系统音频·选择器说明"之前：两者互不相干，别让用户先读一遍无关说明。
-  if (pendingSource === 'helper' && !helperSession) {
-    // 面板刚打开时助手可能还没起来：点「开始」时再探测一次，别让用户重开面板
-    if (!helperInfo) await detectHelper(true);
+  if (pendingSource === 'helper') {
+    // **无条件重探一次**：助手的状态在面板打开之后可能已经变了（用户刚去窗口点了「启动」或
+    // 「暂停」）。用缓存的 helperInfo 判断会形成死循环 —— 提示"请在助手窗口点启动"，用户去点了、
+    // 回来再点「开始」，仍然读到旧的 paused=true。Web 版页面常驻，必然复现。
+    await detectHelper(true);
     if (!helperSession) {
       if (!helperInfo) {
         // 没检测到助手：把原因当面说清楚（配对框照样给出来，助手起来后用户可直接提交）
@@ -1217,7 +1226,13 @@ async function doStart(): Promise<void> {
       setStatus('Stopped');
       return;
     }
-    // 重新探测后拿到有效令牌：不打扰用户，直接继续启动
+    if (helperInfo?.paused) {
+      // 助手窗口处于「暂停」（默认状态）：**先别启动**。否则助手会回一个 paused ERROR，
+      // background 收到 ERROR 会把整场会话（含刚加载好的模型）拆掉，用户还得从头再来一遍。
+      updateSourceHint();
+      setStatus('Stopped');
+      return;
+    }
   }
   // 系统音频：先把"浏览器不能单独授权音频、画面流授权后立刻销毁、记得勾上分享音频"
   // 三件事讲清楚，用户点确认后才进入下面的取流链路。
@@ -2183,7 +2198,8 @@ storage.get('tmspeech_use_punct').then(r => {
 // 坑：GET_STATUS 的 locked 现由 bg 异步回源 storage 后 sendResponse（处理器 return true），
 // promise 仍会正常 resolve，但响应晚于同步分支——此处不得假设响应同步可达。
 // 探测本机助手（并行、几百毫秒内出结果，不阻塞面板其它初始化）：
-// 只有探测成功才让「桌面助手」音源出现在下拉里 —— 产品要求。
+// **音源常驻显示**，探测结果只决定"能不能启动"和提示语（早期"探测到才显示"已废弃，
+// 用户实测在 Web 版里因此找不到这个音源 —— 见 detectHelper 上方注释）。
 void detectHelper();
 sendToHost({ type: 'GET_STATUS' }).then((resp: any) => {
   // 坑：status 缺失（响应异常）时不得调 setStatus——undefined 会落进 else 分支误显 Stopped
