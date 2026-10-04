@@ -1,0 +1,1 @@
+勘误：本提交只改了 CONTRIBUTING.md 与 scripts/bump-version.mjs。提交信息里提到的 PAIRING_CODES/not_paired、panel.ts 注释、web/host.ts stale 守卫实际是上一个提交 02ea5df 引入的（当时写错了归属，内容本身没问题）。
