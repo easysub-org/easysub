@@ -105,7 +105,10 @@ export function helperBaseUrl(port: number): string {
  *   * `connect_failed` / `ws_closed` —— 助手没在运行、端口不对、进程中途退出；
  *   * `paused` —— 助手窗口的总开关（**默认暂停**）：助理对 `start` 回 ERR_PAUSED；
  *   * `forbidden` / `not_paired` —— 令牌没被接受：页面需要重新配对，但会话本身照常跑，
- *     把它当 ERROR 会平白拆掉一整场（潜在误标，独立审查指出）。
+ *     把它当 ERROR 会平白拆掉一整场。**注意（独立审查实测）：坏令牌时助手是在握手层回
+ *     HTTP 403，浏览器只给 onclose，页面实际看到的是 `ws_closed`；这两个码只可能出现在
+ *     `/api/pair` 的响应里**（那条走 helperErrorMessage，不经过这里）。列进来是防御未来
+ *     协议变化 —— 真出现时也应该是"静音 + 提示重配"，而不是拆会话。
  */
 const HELPER_SILENT_CODES = ('connect_failed,ws_closed,paused,forbidden,not_paired').split(',');
 
@@ -209,7 +212,12 @@ export async function loadHelperSession(): Promise<HelperSession | null> {
   try {
     const r = await storage.get(SESSION_KEY);
     const s = r?.[SESSION_KEY];
-    if (!s || typeof s.token !== 'string' || typeof s.port !== 'number') return null;
+    // 坑（独立审查抓的）：空串 token 也算"没有会话"。否则 storage 里留了个 `token: ""` 时，
+    // 第二步复探必然问不出答案（tokenChecked=false）→ 上层按"瞬时失败"保留这条死会话 →
+    // 永远静音、而且连配对框都不弹，用户完全没有出路。
+    if (!s || typeof s.token !== 'string' || !s.token || typeof s.port !== 'number' || !s.port) {
+      return null;
+    }
     return { port: s.port, token: s.token, label: s.label, pairedAt: s.pairedAt };
   } catch {
     return null;
@@ -279,9 +287,8 @@ export interface HelperSourceOptions {
   port: number;
   token: string;
   source?: 'system' | 'mic';
+  /** PCM 交给宿主（宿主再喂 engine.feedMicChunk）——**唯一的音频出口** */
   onPcm: (samples: Float32Array, sampleRate: number) => void;
-  onLevel?: (rms: number, peak: number) => void;
-  onState?: (capturing: boolean, info?: any) => void;
   onError?: (message: string, code?: string) => void;
   log?: (message: string) => void;
   /** 错误文案语言（宿主显式给；i18n 的 getLang 是异步的，同步回调里用不了） */
@@ -304,10 +311,6 @@ export class HelperSource {
     this.opts = { source: 'system', ...opts };
   }
 
-  get running(): boolean {
-    return !!this.ws && this.ws.readyState === WebSocket.OPEN;
-  }
-
   start(): void {
     if (this.ws) return;
     this.stopping = false;
@@ -316,7 +319,11 @@ export class HelperSource {
     try {
       ws = new WebSocket(helperWsUrl(this.opts.port, this.opts.token));
     } catch (e: any) {
-      this.opts.onError?.(String(e?.message || e), 'connect_failed');
+      // 坑：这里**不能**把浏览器给的原始异常串当提示——Chrome 这类消息通常内嵌完整 URL
+      // （含 `?token=`），会被面板日志原样记下来（独立审查指出）。给本地化文案，原始串只进
+      // 控制台日志，便于排查但不泄露令牌。
+      console.log('[桌面助手] WebSocket 构造失败:', e);
+      this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperConnectFailed'), 'connect_failed');
       return;
     }
     ws.binaryType = 'arraybuffer';
@@ -333,13 +340,9 @@ export class HelperSource {
     };
     ws.onclose = () => {
       this.ws = null;
-      if (this.stopping) {
-        this.opts.onState?.(false);
-        return;
-      }
+      if (this.stopping) return;
       // 非主动关闭：明确告诉用户，别让它变成"界面在跑、永远没字幕"的幽灵会话
       this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperWsClosed'), 'ws_closed');
-      this.opts.onState?.(false);
     };
   }
 
@@ -347,13 +350,9 @@ export class HelperSource {
     this.stopping = true;
     const ws = this.ws;
     this.ws = null;
-    if (!ws) {
-      this.opts.onState?.(false);
-      return;
-    }
+    if (!ws) return;
     try { ws.send(JSON.stringify({ type: 'stop' })); } catch { /* 已断开 */ }
     try { ws.close(); } catch { /* 同上 */ }
-    this.opts.onState?.(false);
   }
 
   private handleMessage(ev: MessageEvent): void {
@@ -364,13 +363,6 @@ export class HelperSource {
       switch (msg?.type) {
         case 'hello':
           this.sampleRate = Number(msg.sampleRate) || HELPER_SAMPLE_RATE;
-          this.opts.onState?.(msg.capturing === true, msg);
-          break;
-        case 'state':
-          this.opts.onState?.(msg.capturing === true, msg);
-          break;
-        case 'level':
-          this.opts.onLevel?.(Number(msg.rms) || 0, Number(msg.peak) || 0);
           break;
         case 'error': {
           // 优先用页面自己的 i18n 按稳定 code 渲染（助手带的 message 是桌面端语言的兜底）。

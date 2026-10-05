@@ -139,6 +139,10 @@ micErrModal.onclick = (e) => { if (e.target === micErrModal) micErrModal.hidden 
 let helperInfo: HelperInfo | null = null;
 let helperSession: HelperSession | null = null;
 let helperContinuation: (() => void) | null = null;
+//: 用户在配对框上点过「取消」（= "这次先不配对，照样开始"）。本次会话内不再弹框，
+//: 因为产品决定是"没配对也允许启动、此刻就是静音"——没有这个开关的话，配对框一弹出来
+//: 用户就只能"配对"或"放弃启动"，与决定 1 冲突。换音源/配对成功后重置。
+let helperPairSkipped = false;
 
 const helperPairModal = $opt('helperPairModal') as HTMLDivElement | null;
 const helperPairCodeEl = $opt('helperPairCode') as HTMLInputElement | null;
@@ -186,6 +190,7 @@ async function submitHelperPair() {
     return;
   }
   helperSession = { port, token: res.token, label: res.label, pairedAt: Date.now() };
+  helperPairSkipped = false;          // 配对成功：之后正常不再弹框（本就来问"要不要配"）
   await saveHelperSession(helperSession);
   hideHelperPairModal();
   log(tSync(currentLang, 'helperPairSuccess'));
@@ -196,16 +201,23 @@ async function submitHelperPair() {
 if (helperPairModal) {
   $opt('helperPairSubmit')?.addEventListener('click', () => { void submitHelperPair(); });
   $opt('helperPairCancel')?.addEventListener('click', () => {
+    // 取消 = "这次先不配对，照样开始"（产品决定：没配对也允许启动，此刻是静音）。
+    // 坑（独立审查指出的张力）：旧代码这里是 setStatus('Stopped') + return —— 于是
+    // "探测到助手但没配对"时用户**永远无法静音启动**，只能反复看到配对框。
     helperContinuation = null;
+    helperPairSkipped = true;
     hideHelperPairModal();
-    setStatus('Stopped');
     updateSourceHint();
+    setStatus('Stopped');            // 先回到停止态，再由 doStart 正常起步（避免停在"识别中"）
+    void doStart();
   });
   helperPairCodeEl?.addEventListener('keydown', (e) => {
     if ((e as KeyboardEvent).key === 'Enter') void submitHelperPair();
   });
 }
 
+//: detectHelper 的代次（见函数内的守卫注释）
+let detectGeneration = 0;
 // 探测本机助手：**音源常驻显示**，介绍固定一句常态文案（不再随启动/配对状态切换）。
 // 产品决定（2026-10-05 修正）：不再"探测不到就藏起来"——用户实测在 dist-web 里根本找不到这个
 // 音源（CORS/端口一变探测就失败），于是连"该怎么配对"都无从下手。现在改成：
@@ -213,11 +225,17 @@ if (helperPairModal) {
 // 只有"检测到但未配对"才在点开始时弹配对模态（没有令牌，助手的 /ws 反正会拒，先问清楚）。
 // 探测结果仍有两个用处：配对框要用端口；端口语/助手重启后回写漂移的端口。
 async function detectHelper(full = false) {
+  // 代次守卫（独立审查指出）：面板打开时的 quick 探测与"点开始/选音源"的 full 探测可能并发，
+  // 谁先发起不一定谁先返回 —— 没有这层守卫时，先发起、后返回的那次会把新结果覆盖回旧状态
+  // （helperInfo/helperSession 抖回上一轮的样子，进而误弹/误不弹配对框）。
+  const gen = ++detectGeneration;
   const saved = await loadHelperSession();
-  helperSession = null;
+  let info: HelperInfo | null = null;
   // full=false：面板打开时只探开头几个端口（别在控制台刷 20 条失败请求）；
   // 用户选了「桌面助手」或点了「开始」时用 full=true 全扫一遍（助手可能漂移到后面的端口）。
-  try { helperInfo = await probeHelper({ full, token: saved?.token }); } catch { helperInfo = null; }
+  try { info = await probeHelper({ full, token: saved?.token }); } catch { info = null; }
+  if (gen !== detectGeneration) return;      // 已有更新的一次探测：本次结果作废，别覆盖它
+  helperInfo = info;
   // 带上已存令牌探测：助手回 paired=true 才说明这个浏览器配过（B1：以前不带令牌，
   // 于是 paired 恒为 false，"只需配对一次"直接失效）。
   // 端口以**探测到的**为准：助手重启可能漂移端口，令牌与端口无关，不该因此把有效令牌丢掉；
@@ -225,6 +243,7 @@ async function detectHelper(full = false) {
   // 坑（独立审查抓的）：`tokenChecked === false` 表示第二步复探**没问出来**（助手重启中、
   // 端口抖动），这时 paired 只能退回第一步的 false —— 不能据此把已配好的浏览器打成"未配对"
   // （会弹出配对框要求重配）。保留已存会话，真令牌无效时下一次 WS 握手自然会拒绝并降级成静音。
+  helperSession = null;
   const keepSaved = !!saved && !!helperInfo && (helperInfo.paired || helperInfo.tokenChecked === false);
   if (keepSaved && saved && helperInfo) {
     helperSession = { ...saved, port: helperInfo.port };
@@ -1209,6 +1228,8 @@ selSource.onchange = () => {
   // 换了音源就作废"已确认过系统音频说明"：否则用户确认后切走再切回来，
   // 会被当成已确认而直接弹选择器（少了一道说明，也违背"每次重新开始都讲一遍"）。
   pickConfirmPassed = false;
+  // 用户主动换过音源：把"这次先不配对"的记忆清掉——下次再选回助手时该重新问一次
+  helperPairSkipped = false;
   savePrefs({ audioSource: v });
   // 用户主动选了「桌面助手」：这时候值得全端口扫一遍（助手可能不在默认端口上）
   if (v === 'helper') void detectHelper(true);
@@ -1252,7 +1273,7 @@ async function doStart(): Promise<void> {
     // 页面既没连上 WS（用户在助手窗口点「启动」也不会出声，协议只在已连时广播），
     // 又会一直静音，用户完全没有下一步。配对接口本身不检查暂停（server.handle_pair 只看
     // Origin + 配对码），所以暂停时弹框、提交都能正常工作。
-    if (!helperSession && helperInfo) {
+    if (!helperSession && helperInfo && !helperPairSkipped) {
       // 检测到了但未配对：弹配对框；配对成功后由 continuation 重走 doStart
       helperContinuation = () => { void doStart(); };
       showHelperPairModal();

@@ -130,9 +130,17 @@ function getEngine(): AsrEngine {
 // 导出给面板用：浮窗失联（被导航走/被浏览器丢弃）时面板也要能收敛整场会话。
 
 // 本页是不是"回环地址上的页面"——助手默认只放行回环页面 + 浏览器扩展协议。
+// 坑（独立审查抓的）：别只比 4 个字面量。127.0.0.2 / 127.1 / localhost.（带点）都是回环，
+// 而 file:// 下 location.origin 是字符串 "null" —— 那些情况都不该给"跨域被拦"的指引。
 function isLoopbackPage(): boolean {
   const host = location.hostname.toLowerCase();
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '[::1]';
+  if (!host || host === 'null') return false;
+  if (host === 'localhost' || host === 'localhost.' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '[::1]') return true;
+  if (host === '0.0.0.0') return true;                  // 本机通配，实操上等同回环
+  const v4 = host.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) return v4.slice(1).every((part) => Number(part) <= 255);
+  return host === '127.1';                              // 缩写形式
 }
 
 // 坑（独立审查抓的 major）：Web 版部署在**别的域名**（官方发布的 GitHub Pages、预览站等）时，
@@ -143,7 +151,10 @@ function isLoopbackPage(): boolean {
 function withOriginHint(message: string): string {
   if (isLoopbackPage()) return message;
   try {
-    const hint = tSync(msgLang, 'helperCorsOriginHint').replace('{origin}', location.origin);
+    // 坑：这个文案里 `{origin}` 出现**两次**（"本页地址（{origin}）"与 "--allow-origin {origin}"），
+    // 而 String.replace 只换第一个 —— 第二条命令会原样打出 `{origin}`（独立审查实测）。
+    // 用 split/join 全量替换（不依赖 replaceAll 的 ES2021 目标）。
+    const hint = tSync(msgLang, 'helperCorsOriginHint').split('{origin}').join(location.origin);
     return message + ' ' + hint;
   } catch {
     return message;
