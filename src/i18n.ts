@@ -220,8 +220,8 @@ const strings: Record<string, Record<string, string>> = {
     // 无「麦克风设备」选择项：设备由 Chrome 授权弹窗选择并记住，扩展内不重复该 UI
     sourceMic: '麦克风',
     sourceHelper: '桌面助手（实验性）',
-    helperReleases: '本机助手是独立程序（实验性），下载/更新在这里：',
-    sourceHintHelper: '从本机助手获取系统音频：整机声音都能识别，不用弹屏幕共享选择器、也没有授权框。首次使用需输入助手窗口里显示的 6 位配对码。',
+    helperReleases: '本机助手是为了方便获取音频而开发的独立小程序（实验性）——浏览器拿不到的整机声音由它来采集。下载/更新在这里：',
+    sourceHintHelper: '本机助手为方便获取音频而生：整机声音都能识别，不用弹屏幕共享选择器、也没有授权框。首次使用需输入助手窗口里显示的 6 位配对码。',
     sourceHintHelperUnpaired: '已检测到本机助手，但还没配对：点「开始」会弹出配对框，把助手窗口里的 6 位配对码填进去即可（只需一次）。',
     helperPairTitle: '与桌面助手配对',
     helperPairBody: '「易字幕本机助手」窗口里有一个 6 位配对码，输入它即可完成配对（只需一次，之后本浏览器长期有效）。',
@@ -484,8 +484,8 @@ const strings: Record<string, Record<string, string>> = {
     // device and remembers it, so the extension does not duplicate that UI.
     sourceMic: 'Microphone',
     sourceHelper: 'Desktop helper (experimental)',
-    helperReleases: 'The helper is a separate program (experimental) — download or update it here:',
-    sourceHintHelper: 'Takes system audio from the local helper: whole-machine sound, no screen-sharing picker and no permission dialog. The first start asks for the 6-character pair code shown in the helper window.',
+    helperReleases: 'The helper is a small separate program built to make audio capture easy (experimental) — it captures the whole-machine sound that the browser cannot. Download or update it here:',
+    sourceHintHelper: 'The local helper exists to make audio capture easy: whole-machine sound, no screen-sharing picker and no permission dialog. The first start asks for the 6-character pair code shown in the helper window.',
     sourceHintHelperUnpaired: 'The local helper was detected but this browser is not paired yet: pressing Start opens the pairing box — type the 6-character code shown in the helper window (once).',
     helperPairTitle: 'Pair with the desktop helper',
     helperPairBody: 'The EasySub Helper window shows a 6-character pair code. Enter it once — this browser stays paired afterwards.',
