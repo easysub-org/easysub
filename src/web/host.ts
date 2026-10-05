@@ -174,8 +174,9 @@ async function startHelperSource(isStale: () => boolean) {
   // 这里必须再查一次代次，否则会留下一条没人关闭的 WS（助手会一直推流）。
   if (isStale()) return;
   if (!session) {
-    // 缺会话 = 没配对（可能没启动助手，也可能开着但没配过/暂停）——全是常态，当静音音源。
-    // 文案用对三种成因都成立的句子，别说"没在运行"（用户窗口可能开着）；且这是单行日志区，
+    // 缺会话 = 没配对（可能没启动助手，也可能开着但没配过）——全是常态，当静音音源。
+    // 文案要与"只在没有令牌时发送"这一事实一致：别说"没在运行"（用户窗口可能开着），
+    // 也别提"暂停"（那由 ERR_PAUSED → helperPaused 那条路负责）；且这是单行日志区，
     // 没有链接可点，别写"在下方链接下载"。
     emitToPanel({ type: 'HELPER_SILENT', message: withOriginHint(tSync(msgLang, 'helperSilentGeneric')) });
     return;

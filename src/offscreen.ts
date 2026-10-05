@@ -213,9 +213,10 @@ function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
   const port = Number(portRaw);
   const token = String(tokenRaw || '');
   if (!port || !token) {
-    // 缺令牌 = 没配对（可能压根没启动助手，也可能助手开着但没配过/处于暂停）。
-    // 这些全是常态：当静音音源处理，不发 ERROR（那会把整场会话拆掉）。文案必须对三种成因
-    // 都成立，别说"没在运行"——用户明明开着助手窗口（独立审查抓的假文案）。
+    // 缺令牌 = 没配对（可能压根没启动助手，也可能助手开着但没配过）。
+    // 这些全是常态：当静音音源处理，不发 ERROR（那会把整场会话拆掉）。文案要与"只在没有令牌
+    // 时发送"这一事实一致——别说"没在运行"（用户明明开着助手窗口），也别提"暂停"（那由
+    // ERR_PAUSED → helperPaused 那条路负责，独立审查两轮分别抓过这两处漂移）。
     toPanel({ type: 'HELPER_SILENT', message: tSync(helperLang, 'helperSilentGeneric') });
     return;
   }
