@@ -59,8 +59,9 @@
         <option value="tab" id="optSourceTab">当前标签页</option>
         <option value="system" id="optSourceSystem">系统音频（整个屏幕）</option>
         <option value="mic" id="optSourceMic">麦克风</option>
-        <!-- 桌面助手音源：**常驻显示**（探测不到也看得见，由提示语说明状态）；
-             选中后必须配对成功才能启动 —— 见 panel.ts 的 doStart/detectHelper -->
+        <!-- 桌面助手音源：**常驻显示**（探测不到也看得见）。介绍固定一句话、不随状态变化；
+             没启动/没配对/助手处于暂停**都不拦启动**（此刻就是静音，识别照常），
+             只有"探测到了但还没配对"才在点开始时弹配对框 —— 见 panel.ts 的 doStart/detectHelper -->
         <option value="helper" id="optSourceHelper">桌面助手</option>
       </select>
       <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
@@ -505,7 +506,10 @@
 
   <!-- 桌面助手配对·模态（两端共用）：助手会把本机音频交给任何连上来的页面，所以首次必须用
        配对码换取设备令牌（配对码只显示在用户自己启动的助手窗口里，= 用户在场的证明）。
-       音源本身是常驻显示的，这个模态只在"选了助手音源 + 本浏览器还没有令牌"时弹出。 -->
+       音源本身是常驻显示的；弹出条件：选了助手音源 + 探测到了助手（/api/pair/info 明确答
+       app=easysub-helper）+ 本浏览器还没有令牌，且**没有点过「取消」**（点过之后本次会话
+       不再打扰；会话一结束就恢复——见 panel.ts 的 helperPairSkipped）。
+       点「取消」= 这次先不配对、照样静音开始。 -->
   <div class="unsup-mask" id="helperPairModal" hidden>
     <div class="unsup-card" role="dialog" aria-modal="true" aria-labelledby="helperPairTitleEl">
       <div class="unsup-head">

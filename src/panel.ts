@@ -139,6 +139,13 @@ micErrModal.onclick = (e) => { if (e.target === micErrModal) micErrModal.hidden 
 let helperInfo: HelperInfo | null = null;
 let helperSession: HelperSession | null = null;
 let helperContinuation: (() => void) | null = null;
+//: 用户在配对框上点过「取消」（= "这次先不配对，照样开始"）。本次会话内不再弹框，
+//: 因为产品决定是"没配对也允许启动、此刻就是静音"——没有这个开关的话，配对框一弹出来
+//: 用户就只能"配对"或"放弃启动"，与决定 1 冲突。
+//: 复位点：**会话结束**（`setStatus('Stopped')`，覆盖面板停止按钮 / 从字幕浮窗停止 / ERROR
+//: 收敛——只挂面板按钮会在 Web 上漏掉浮窗那条路）、换音源、配对成功。取消处理里会在
+//: `setStatus('Stopped')` **之后**再置位，避免立刻重弹。
+let helperPairSkipped = false;
 
 const helperPairModal = $opt('helperPairModal') as HTMLDivElement | null;
 const helperPairCodeEl = $opt('helperPairCode') as HTMLInputElement | null;
@@ -170,6 +177,10 @@ function showHelperPairError(text: string) {
   helperPairErrEl.hidden = false;
 }
 async function submitHelperPair() {
+  // **提交前无条件重探**：配对框打开后助手可能重启/漂移端口，拿缓存的 helperInfo.port 去提交
+  // 会连到死端口，用户看到的是"没探测到助手"这种误导性错误、而且失败后不重探、只能取消重来
+  // （独立审查抓的）。重探一次 ~几百毫秒，换来端口与"是否已配对"都是新的。
+  await detectHelper(true);
   const port = helperInfo?.port;
   const code = (helperPairCodeEl?.value || '').trim();
   if (!port) { showHelperPairError(tSync(currentLang, 'helperNotFound')); return; }
@@ -182,6 +193,7 @@ async function submitHelperPair() {
     return;
   }
   helperSession = { port, token: res.token, label: res.label, pairedAt: Date.now() };
+  helperPairSkipped = false;          // 配对成功：之后正常不再弹框（本就来问"要不要配"）
   await saveHelperSession(helperSession);
   hideHelperPairModal();
   log(tSync(currentLang, 'helperPairSuccess'));
@@ -192,16 +204,26 @@ async function submitHelperPair() {
 if (helperPairModal) {
   $opt('helperPairSubmit')?.addEventListener('click', () => { void submitHelperPair(); });
   $opt('helperPairCancel')?.addEventListener('click', () => {
+    // 取消 = "这次先不配对，照样开始"（产品决定：没配对也允许启动，此刻是静音）。
+    // 坑（独立审查指出的张力）：旧代码这里是 setStatus('Stopped') + return —— 于是
+    // "探测到助手但没配对"时用户**永远无法静音启动**。
+    // 顺序很关键：`setStatus('Stopped')` 会把 helperPairSkipped 复位（见 setStatus 里的注释，
+    // 那是为了覆盖"从浮窗停止"等所有停止路径），所以标志必须在它**之后**再置位，
+    // 否则 doStart 读到的还是 false → 立刻又弹一次配对框（死循环）。
     helperContinuation = null;
     hideHelperPairModal();
-    setStatus('Stopped');
     updateSourceHint();
+    setStatus('Stopped');
+    helperPairSkipped = true;
+    void doStart();
   });
   helperPairCodeEl?.addEventListener('keydown', (e) => {
     if ((e as KeyboardEvent).key === 'Enter') void submitHelperPair();
   });
 }
 
+//: detectHelper 的代次（见函数内的守卫注释）
+let detectGeneration = 0;
 // 探测本机助手：**音源常驻显示**，介绍固定一句常态文案（不再随启动/配对状态切换）。
 // 产品决定（2026-10-05 修正）：不再"探测不到就藏起来"——用户实测在 dist-web 里根本找不到这个
 // 音源（CORS/端口一变探测就失败），于是连"该怎么配对"都无从下手。现在改成：
@@ -209,16 +231,27 @@ if (helperPairModal) {
 // 只有"检测到但未配对"才在点开始时弹配对模态（没有令牌，助手的 /ws 反正会拒，先问清楚）。
 // 探测结果仍有两个用处：配对框要用端口；端口语/助手重启后回写漂移的端口。
 async function detectHelper(full = false) {
+  // 代次守卫（独立审查指出）：面板打开时的 quick 探测与"点开始/选音源"的 full 探测可能并发，
+  // 谁先发起不一定谁先返回 —— 没有这层守卫时，先发起、后返回的那次会把新结果覆盖回旧状态
+  // （helperInfo/helperSession 抖回上一轮的样子，进而误弹/误不弹配对框）。
+  const gen = ++detectGeneration;
   const saved = await loadHelperSession();
-  helperSession = null;
+  let info: HelperInfo | null = null;
   // full=false：面板打开时只探开头几个端口（别在控制台刷 20 条失败请求）；
   // 用户选了「桌面助手」或点了「开始」时用 full=true 全扫一遍（助手可能漂移到后面的端口）。
-  try { helperInfo = await probeHelper({ full, token: saved?.token }); } catch { helperInfo = null; }
+  try { info = await probeHelper({ full, token: saved?.token }); } catch { info = null; }
+  if (gen !== detectGeneration) return;      // 已有更新的一次探测：本次结果作废，别覆盖它
+  helperInfo = info;
   // 带上已存令牌探测：助手回 paired=true 才说明这个浏览器配过（B1：以前不带令牌，
   // 于是 paired 恒为 false，"只需配对一次"直接失效）。
   // 端口以**探测到的**为准：助手重启可能漂移端口，令牌与端口无关，不该因此把有效令牌丢掉；
   // 顺手写回 storage，让存储端口跟上（storedPort() 下次直接命中）。
-  if (helperInfo?.paired && saved) {
+  // 坑（独立审查抓的）：`tokenChecked === false` 表示第二步复探**没问出来**（助手重启中、
+  // 端口抖动），这时 paired 只能退回第一步的 false —— 不能据此把已配好的浏览器打成"未配对"
+  // （会弹出配对框要求重配）。保留已存会话，真令牌无效时下一次 WS 握手自然会拒绝并降级成静音。
+  helperSession = null;
+  const keepSaved = !!saved && !!helperInfo && (helperInfo.paired || helperInfo.tokenChecked === false);
+  if (keepSaved && saved && helperInfo) {
     helperSession = { ...saved, port: helperInfo.port };
     void saveHelperSession(helperSession);
   }
@@ -758,7 +791,25 @@ document.querySelectorAll<HTMLButtonElement>('.seg').forEach(b => {
 const LEVEL_BARS = 60; // 保留最近 60 个采样（~120ms/条 ≈ 7 秒历史）
 let levels: number[] = [];
 let waveRaf = 0;
+//: 减弱动效模式下的低频重绘定时器（没它波形会在没数据时冻住，见 startWave）
+let waveTimer = 0;
+//: 最近一次收到 LEVEL 的时刻。用来判断"到底还有没有电平数据在来"——见 decayLevelsIfStale。
+let lastLevelAt = 0;
+let lastDecayAt = 0;
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+// 无 LEVEL 时的兜底采样（用户实测「波形不动」）：助手没连上、助手处于暂停、采集彻底停掉
+// 时，一条 LEVEL 都不会来，波形会**冻结在最后一个形状**上——看着像卡死，其实是没数据。
+// 这里按 ~120ms 补一个 0，让它自己落回基线："没声音"就该看起来是空的。
+// 只在 Running 时补：停止后本来就画静止基线。
+function decayLevelsIfStale() {
+  if (lastStatus !== 'Running') return;
+  const now = Date.now();
+  if (now - lastLevelAt < 300 || now - lastDecayAt < 120) return;
+  lastDecayAt = now;
+  levels.push(0);
+  if (levels.length > LEVEL_BARS) levels.shift();
+}
 
 function drawWave() {
   const dpr = window.devicePixelRatio || 1;
@@ -771,6 +822,7 @@ function drawWave() {
   }
   const ctx = waveCanvas.getContext('2d');
   if (!ctx) return;
+  decayLevelsIfStale();     // 没数据时自己落回基线，别冻结在上一帧
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
   const gap = 2;
@@ -791,13 +843,21 @@ function startWave() {
   // 坑：先 cancel 再启——Running 抖动会连发 startWave，不清旧 rAF 会叠多个循环越画越快
   stopWaveLoop();
   if (!chkWaveform.checked || lastStatus !== 'Running') { drawWave(); return; }
-  if (reduceMotion.matches) { drawWave(); return; } // 减弱动态：只随 LEVEL 消息事件驱动重绘
+  if (reduceMotion.matches) {
+    // 减弱动效：不跑 rAF，但**不能只等 LEVEL 事件**——助手掉线/处于暂停时一条 LEVEL 都不会来，
+    // 只靠消息驱动会让波形冻结在最后一帧（独立审查抓的）。改用低频定时器驱动重绘：
+    // 既保持"不播放动画"的初衷，又让"没数据 → 落回基线"（decayLevelsIfStale）真的生效。
+    drawWave();
+    waveTimer = window.setInterval(() => drawWave(), 150);
+    return;
+  }
   const loop = () => { drawWave(); waveRaf = requestAnimationFrame(loop); };
   waveRaf = requestAnimationFrame(loop);
 }
 
 function stopWaveLoop() {
   if (waveRaf) { cancelAnimationFrame(waveRaf); waveRaf = 0; }
+  if (waveTimer) { clearInterval(waveTimer); waveTimer = 0; }
 }
 
 function updateWaveVisibility() {
@@ -1028,6 +1088,12 @@ function setStatus(status: string, startedAt?: number) {
     levels = [];
     if (chkWaveform.checked) drawWave();
     statusWordEl.textContent = tSync(currentLang, hasStarted ? 'stateStopped' : 'stateReady');
+    // 任何"会话结束"都该重新给一次配对机会（独立审查抓的 F1）：只挂面板自己的停止按钮不够——
+    // Web 版从**字幕浮窗**停止（工具条/关画中画/关浮窗）走的是 host.stopSession()，面板只会收到
+    // STATUS_CHANGED:Stopped，复位点就漏了。放这里覆盖全部停止路径（面板按钮、浮窗、ERROR 收敛）。
+    // 注意**不能**反过来担心死循环：取消处理是先 setStatus('Stopped') 再置 helperPairSkipped=true，
+    // 顺序保证 doStart 读到的仍是 true（见 helperPairCancel 的注释）。
+    helperPairSkipped = false;
   }
 }
 
@@ -1174,6 +1240,8 @@ selSource.onchange = () => {
   // 换了音源就作废"已确认过系统音频说明"：否则用户确认后切走再切回来，
   // 会被当成已确认而直接弹选择器（少了一道说明，也违背"每次重新开始都讲一遍"）。
   pickConfirmPassed = false;
+  // 用户主动换过音源：把"这次先不配对"的记忆清掉——下次再选回助手时该重新问一次
+  helperPairSkipped = false;
   savePrefs({ audioSource: v });
   // 用户主动选了「桌面助手」：这时候值得全端口扫一遍（助手可能不在默认端口上）
   if (v === 'helper') void detectHelper(true);
@@ -1210,10 +1278,14 @@ async function doStart(): Promise<void> {
     // 回来再点「开始」，仍然读到旧的 paused=true。Web 版页面常驻，必然复现。
     await detectHelper(true);
     // 产品决定（2026-10-05）：**不再要求助手已启动/已配对才能点开始**。
-    // 助手没启动 → 这条音源就是空音频（静音帧），识别照常进行，用户看到的只是"没字"；
-    // 助手在跑但没配对 → 走原有配对框（没有令牌，助手的 /ws 反正会拒，不如先问清楚）。
-    // 暂停 → 助手推的也是静音帧，同样不拦。
-    if (!helperSession && helperInfo && !helperInfo.paused) {
+    // 助手没启动 → 这条音源就是空音频（静音帧），识别照常进行，用户看到的只是"没字"。
+    // 助手在跑（**含暂停**）但没配对 → 弹配对框：没有令牌，助手的 /ws 反正会拒，不如先问清楚。
+    // 坑：这里**不能**加 `&& !helperInfo.paused`（独立审查抓的 major）——助手窗口的总开关
+    // **默认就是暂停**，加了这一条等于"新用户装好助手、点开始"这条主路径永远拿不到配对入口：
+    // 页面既没连上 WS（用户在助手窗口点「启动」也不会出声，协议只在已连时广播），
+    // 又会一直静音，用户完全没有下一步。配对接口本身不检查暂停（server.handle_pair 只看
+    // Origin + 配对码），所以暂停时弹框、提交都能正常工作。
+    if (!helperSession && helperInfo && !helperPairSkipped) {
       // 检测到了但未配对：弹配对框；配对成功后由 continuation 重走 doStart
       helperContinuation = () => { void doStart(); };
       showHelperPairModal();
@@ -1366,7 +1438,7 @@ $('btnCompat').onclick = () => { void openCompatCheck(); };
 
 btnStop.onclick = () => {
   sendToHost({ type: 'STOP_RECOGNITION' }).catch(() => {});
-  setStatus('Stopped');
+  setStatus('Stopped');       // 复位 helperPairSkipped 就在 setStatus 里（覆盖浮窗停止等全部路径）
 };
 
 // —— ASR 模型缺失引导（nomodel 版安装包）——
@@ -2135,6 +2207,7 @@ onMessageFromHost((msg) => {
       const v = Math.max(0, Math.min(1, Number(msg.v) || 0));
       levels.push(v);
       if (levels.length > LEVEL_BARS) levels.shift();
+      lastLevelAt = Date.now();   // 有数据在来，别触发兜底补零
       // 减弱动态模式下无 rAF 循环，随消息事件驱动重绘（~120ms 一条，足够顺滑）
       if (reduceMotion.matches && lastStatus === 'Running' && chkWaveform.checked) drawWave();
       break;

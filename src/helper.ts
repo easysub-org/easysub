@@ -42,6 +42,14 @@ export interface HelperInfo {
   port: number;
   version: string;
   paired: boolean;
+  /**
+   * 第二步（带 `?token=` 的复探）**是否真的拿到过答案**。
+   *
+   * 坑（独立审查抓的）：第二步是带令牌问"这个浏览器配过没有"，它可能瞬时失败（助手重启中、
+   * 端口抖动），此时 `paired` 只能退回第一步的 false —— 调用方若据此判定"没配对"，
+   * 已配好的浏览器会被要求重新配对。所以这里显式区分"助手说没配"与"没问出来"。
+   */
+  tokenChecked: boolean;
   /** 助手窗口的总开关是否处于暂停（默认暂停）：暂停时助手不采音频，只推静音帧 */
   paused: boolean;
   lang: string;
@@ -67,7 +75,14 @@ export interface PairSuccess {
   label: string;
 }
 
-export function helperPorts(preferred?: number, full = true): number[] {
+/**
+ * 要探测的端口列表。`full=false`（默认）只扫开头几个，`full=true` 扫满 20 个（+ 记住的端口）。
+ *
+ * 坑：默认值必须与这里的文档一致（独立审查抓到签名写着 `full = true` 而文档说"默认 false"）。
+ * 默认取 false 是有意的——裸调一次 `helperPorts()` 不该在本机刷出 21 条失败请求。
+ * 两个调用方（面板 detectHelper 与 probeHelper）都**显式**传这个参数，所以改动不影响它们。
+ */
+export function helperPorts(preferred?: number, full = false): number[] {
   const out: number[] = [];
   if (preferred) out.push(preferred);
   const last = full ? HELPER_PORT_SCAN : HELPER_PROBE_QUICK_PORTS;
@@ -77,6 +92,28 @@ export function helperPorts(preferred?: number, full = true): number[] {
 
 export function helperBaseUrl(port: number): string {
   return `http://127.0.0.1:${port}`;
+}
+
+/**
+ * 哪些助手错误码属于**静音降级**（不是故障，别把会话连模型一起拆掉）。
+ *
+ * 产品决定（2026-10-05）：桌面助手音源"没启动/没配对/暂停"都是常态，此刻就是静音，
+ * 识别照常跑。扩展端 offscreen 与 Web 宿主必须用同一份清单——两处各写一份正是上一轮
+ * 审查抓到的"两端行为不一致"。
+ *
+ * 逐个说明：
+ *   * `connect_failed` / `ws_closed` —— 助手没在运行、端口不对、进程中途退出；
+ *   * `paused` —— 助手窗口的总开关（**默认暂停**）：助理对 `start` 回 ERR_PAUSED；
+ *   * `forbidden` / `not_paired` —— 令牌没被接受：页面需要重新配对，但会话本身照常跑，
+ *     把它当 ERROR 会平白拆掉一整场。**注意（独立审查实测）：坏令牌时助手是在握手层回
+ *     HTTP 403，浏览器只给 onclose，页面实际看到的是 `ws_closed`；这两个码只可能出现在
+ *     `/api/pair` 的响应里**（那条走 helperErrorMessage，不经过这里）。列进来是防御未来
+ *     协议变化 —— 真出现时也应该是"静音 + 提示重配"，而不是拆会话。
+ */
+const HELPER_SILENT_CODES = ('connect_failed,ws_closed,paused,forbidden,not_paired').split(',');
+
+export function isHelperSilentCode(code?: string): boolean {
+  return !!code && HELPER_SILENT_CODES.indexOf(code) >= 0;
 }
 
 // 令牌放 query：WS 与 fetch 都能用同一种方式带（助手同时支持 X-Easysub-Token 头）
@@ -138,15 +175,20 @@ async function probePort(port: number, token?: string): Promise<HelperInfo | nul
   // /api/pair/info 无鉴权且必定 200；拿到 __status 说明被拒（CORS/其它服务），不算助手
   if (!first || first.__status || first.app !== 'easysub-helper') return null;
   let data = first;
+  let tokenChecked = false;
   if (token) {
     const withToken = await fetchJson(`${url}?token=${encodeURIComponent(token)}`, undefined,
       PROBE_TIMEOUT_MS).catch(() => null);
-    if (withToken && !withToken.__status) data = withToken;
+    if (withToken && !withToken.__status) {
+      data = withToken;
+      tokenChecked = true;              // 只有真的问出来了才敢说"助手答了"
+    }
   }
   return {
     port,
     version: String(data.version || ''),
     paired: data.paired === true,
+    tokenChecked,
     paused: data.paused === true,
     lang: String(data.lang || ''),
     platform: String(data.platform || ''),
@@ -170,7 +212,12 @@ export async function loadHelperSession(): Promise<HelperSession | null> {
   try {
     const r = await storage.get(SESSION_KEY);
     const s = r?.[SESSION_KEY];
-    if (!s || typeof s.token !== 'string' || typeof s.port !== 'number') return null;
+    // 坑（独立审查抓的）：空串 token 也算"没有会话"。否则 storage 里留了个 `token: ""` 时，
+    // 第二步复探必然问不出答案（tokenChecked=false）→ 上层按"瞬时失败"保留这条死会话 →
+    // 永远静音、而且连配对框都不弹，用户完全没有出路。
+    if (!s || typeof s.token !== 'string' || !s.token || typeof s.port !== 'number' || !s.port) {
+      return null;
+    }
     return { port: s.port, token: s.token, label: s.label, pairedAt: s.pairedAt };
   } catch {
     return null;
@@ -240,9 +287,8 @@ export interface HelperSourceOptions {
   port: number;
   token: string;
   source?: 'system' | 'mic';
+  /** PCM 交给宿主（宿主再喂 engine.feedMicChunk）——**唯一的音频出口** */
   onPcm: (samples: Float32Array, sampleRate: number) => void;
-  onLevel?: (rms: number, peak: number) => void;
-  onState?: (capturing: boolean, info?: any) => void;
   onError?: (message: string, code?: string) => void;
   log?: (message: string) => void;
   /** 错误文案语言（宿主显式给；i18n 的 getLang 是异步的，同步回调里用不了） */
@@ -265,10 +311,6 @@ export class HelperSource {
     this.opts = { source: 'system', ...opts };
   }
 
-  get running(): boolean {
-    return !!this.ws && this.ws.readyState === WebSocket.OPEN;
-  }
-
   start(): void {
     if (this.ws) return;
     this.stopping = false;
@@ -277,7 +319,11 @@ export class HelperSource {
     try {
       ws = new WebSocket(helperWsUrl(this.opts.port, this.opts.token));
     } catch (e: any) {
-      this.opts.onError?.(String(e?.message || e), 'connect_failed');
+      // 坑：这里**不能**把浏览器给的原始异常串当提示——Chrome 这类消息通常内嵌完整 URL
+      // （含 `?token=`），会被面板日志原样记下来（独立审查指出）。所以 UI 走本地化文案，
+      // 控制台也只留异常**名字**（连名字都别带 URL）。
+      console.log('[桌面助手] WebSocket 构造失败:', e?.name || 'Error');
+      this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperConnectFailed'), 'connect_failed');
       return;
     }
     ws.binaryType = 'arraybuffer';
@@ -294,13 +340,9 @@ export class HelperSource {
     };
     ws.onclose = () => {
       this.ws = null;
-      if (this.stopping) {
-        this.opts.onState?.(false);
-        return;
-      }
+      if (this.stopping) return;
       // 非主动关闭：明确告诉用户，别让它变成"界面在跑、永远没字幕"的幽灵会话
       this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperWsClosed'), 'ws_closed');
-      this.opts.onState?.(false);
     };
   }
 
@@ -308,13 +350,9 @@ export class HelperSource {
     this.stopping = true;
     const ws = this.ws;
     this.ws = null;
-    if (!ws) {
-      this.opts.onState?.(false);
-      return;
-    }
+    if (!ws) return;
     try { ws.send(JSON.stringify({ type: 'stop' })); } catch { /* 已断开 */ }
     try { ws.close(); } catch { /* 同上 */ }
-    this.opts.onState?.(false);
   }
 
   private handleMessage(ev: MessageEvent): void {
@@ -325,13 +363,6 @@ export class HelperSource {
       switch (msg?.type) {
         case 'hello':
           this.sampleRate = Number(msg.sampleRate) || HELPER_SAMPLE_RATE;
-          this.opts.onState?.(msg.capturing === true, msg);
-          break;
-        case 'state':
-          this.opts.onState?.(msg.capturing === true, msg);
-          break;
-        case 'level':
-          this.opts.onLevel?.(Number(msg.rms) || 0, Number(msg.peak) || 0);
           break;
         case 'error': {
           // 优先用页面自己的 i18n 按稳定 code 渲染（助手带的 message 是桌面端语言的兜底）。

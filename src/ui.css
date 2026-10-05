@@ -701,6 +701,16 @@ body[data-mode="light"] .unsup-card { box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2)
    保证英文文案下也不至于竖排成一条窄柱 */
 .unsup-card.pick-confirm { max-width: 380px; }
 .unsup-actions { display: flex; gap: 6px; margin-top: 2px; }
+/* 配对码输入框：以前这个 class 在 CSS 里根本不存在（独立审查抓的），深色卡片里会露出
+   浏览器默认的白色输入框。这里跟 .unsup-btn 用同一套表面色 + 等宽字体（6 位码看着更像码）。 */
+.helper-pair-input {
+  width: 100%; box-sizing: border-box;
+  padding: 7px 9px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface-input); color: var(--text);
+  font: 500 13px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 2px; text-transform: uppercase; text-align: center;
+}
+.helper-pair-input:focus { outline: none; border-color: var(--accent); }
 .unsup-btn {
   flex: 1 1 0; min-width: 0;
   padding: 6px 8px; border-radius: 7px; cursor: pointer;

@@ -19,7 +19,7 @@
 //   少任何一条都会表现成"看起来一样、用起来不一样"（用户已验证过的那些 bug）。
 import { AsrEngine } from '../asr-engine';
 import { MicCapture, micErrorText } from '../mic-capture';
-import { HelperSource, loadHelperSession } from '../helper';
+import { HelperSource, isHelperSilentCode, loadHelperSession } from '../helper';
 import { emitToPanel, onHostMessage, resolveUrl, storage } from '../platform';
 import { tSync } from '../i18n';
 import { appendTranscript, attachTranscriptTranslation } from '../transcript-store';
@@ -129,6 +129,41 @@ function getEngine(): AsrEngine {
 // 幂等——ERROR / 浮窗关闭 / 用户点停止 三条路都会走到这里。
 // 导出给面板用：浮窗失联（被导航走/被浏览器丢弃）时面板也要能收敛整场会话。
 
+// 本页是不是"回环地址上的页面"——判定必须与助手那边的白名单**逐字对齐**（助手用
+// `security.is_loopback_origin`：`localhost` / `localhost.localdomain` 两个字面量，或
+// Python `ipaddress.ip_address(host).is_loopback`，即 IPv4 只有 127.0.0.0/8、IPv6 只有 ::1）。
+// 坑（独立审查抓的）：写宽了比写窄了更糟 —— 把 `0.0.0.0` / `127.1` / `localhost.` / `*.localhost`
+// 也当回环时，助手其实**会拒绝**它们，而这里却因此不给"站点没被放行"的指引，用户只剩静音。
+function isLoopbackPage(): boolean {
+  const host = location.hostname.toLowerCase();
+  if (host === 'localhost' || host === 'localhost.localdomain') return true;
+  if (host === '::1' || host === '[::1]') return true;      // 浏览器给的是带方括号的形式
+  const v4 = host.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  return !!v4 && v4.slice(1).every((part) => Number(part) <= 255);
+}
+
+// 坑（独立审查抓的 major）：Web 版部署在**别的域名**（官方发布的 GitHub Pages、预览站等）时，
+// 助手的 Origin 白名单默认不放行这个来源 → 浏览器把 /api/pair/info 的响应整个拦掉（CORS），
+// 探测一律失败。页面这边只能看到"没有助手"，于是配对框永远不出现、只剩一行静音日志——
+// 而用户其实需要的是"让助手放行这个站点"。**这不是状态提示，是可执行的补救指引**，
+// 所以只在非回环页面追加，回环页面（正常自建场景）一个字都不多说。
+function withOriginHint(message: string): string {
+  if (isLoopbackPage()) return message;
+  try {
+    // 坑：这个文案里 `{origin}` 出现**两次**（"本页地址（{origin}）"与 "--allow-origin {origin}"），
+    // 而 String.replace 只换第一个 —— 第二条命令会原样打出 `{origin}`（独立审查实测）。
+    // 用 split/join 全量替换（不依赖 replaceAll 的 ES2021 目标）。
+    // file:// 页面没有 origin（字符串 "null"）：写成 "file://" 也比"本页地址（null）"可读。
+    const origin = location.origin && location.origin !== 'null'
+      ? location.origin
+      : location.protocol + '//';
+    const hint = tSync(msgLang, 'helperCorsOriginHint').split('{origin}').join(origin);
+    return message + ' ' + hint;
+  } catch {
+    return message;
+  }
+}
+
 // 桌面助手音频源：WS 由本宿主持有（面板页就是引擎宿主），PCM 直接喂进识别管道。
 // 令牌从 storage 读——面板配对成功后会写进去，这里不重复探测（避免两处状态不一致）。
 async function startHelperSource(isStale: () => boolean) {
@@ -139,10 +174,11 @@ async function startHelperSource(isStale: () => boolean) {
   // 这里必须再查一次代次，否则会留下一条没人关闭的 WS（助手会一直推流）。
   if (isStale()) return;
   if (!session) {
-    // 缺会话 = 没配对（可能没启动助手，也可能开着但没配过/暂停）——全是常态，当静音音源。
-    // 文案用对三种成因都成立的句子，别说"没在运行"（用户窗口可能开着）；且这是单行日志区，
+    // 缺会话 = 没配对（可能没启动助手，也可能开着但没配过）——全是常态，当静音音源。
+    // 文案要与"只在没有令牌时发送"这一事实一致：别说"没在运行"（用户窗口可能开着），
+    // 也别提"暂停"（那由 ERR_PAUSED → helperPaused 那条路负责）；且这是单行日志区，
     // 没有链接可点，别写"在下方链接下载"。
-    emitToPanel({ type: 'HELPER_SILENT', message: tSync(msgLang, 'helperSilentGeneric') });
+    emitToPanel({ type: 'HELPER_SILENT', message: withOriginHint(tSync(msgLang, 'helperSilentGeneric')) });
     return;
   }
   helper = new HelperSource({
@@ -150,11 +186,13 @@ async function startHelperSource(isStale: () => boolean) {
     token: session.token,
     source: 'system',
     lang: msgLang,
+    // 与扩展端同一条通道：PCM 交给引擎，电平由引擎自己算（不给 helper 开专属通路）
     onPcm: (f32, rate) => getEngine().feedMicChunk(f32, rate),
     onError: (message, code) => {
-      // 与扩展端 offscreen 同一套降级（复审抓的不一致）：没启动/暂停是常态，
-      // 空音频=静音帧、识别照常——只记日志，不把整场会话连模型一起拆掉。
-      if (code === 'connect_failed' || code === 'ws_closed' || code === 'paused') {
+      // 与扩展端 offscreen 同一套降级（复审抓的不一致）：没启动/暂停/令牌没被接受
+      // 都是常态，空音频=静音帧、识别照常——只记日志，不把整场会话连模型一起拆掉。
+      // 清单共用 helper.isHelperSilentCode（别再各写一份，那就是不一致的来源）。
+      if (isHelperSilentCode(code)) {
         emitToPanel({ type: 'HELPER_SILENT', message });
         return;
       }
