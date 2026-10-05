@@ -141,7 +141,10 @@ let helperSession: HelperSession | null = null;
 let helperContinuation: (() => void) | null = null;
 //: 用户在配对框上点过「取消」（= "这次先不配对，照样开始"）。本次会话内不再弹框，
 //: 因为产品决定是"没配对也允许启动、此刻就是静音"——没有这个开关的话，配对框一弹出来
-//: 用户就只能"配对"或"放弃启动"，与决定 1 冲突。换音源/配对成功后重置。
+//: 用户就只能"配对"或"放弃启动"，与决定 1 冲突。
+//: 复位点：**会话结束**（`setStatus('Stopped')`，覆盖面板停止按钮 / 从字幕浮窗停止 / ERROR
+//: 收敛——只挂面板按钮会在 Web 上漏掉浮窗那条路）、换音源、配对成功。取消处理里会在
+//: `setStatus('Stopped')` **之后**再置位，避免立刻重弹。
 let helperPairSkipped = false;
 
 const helperPairModal = $opt('helperPairModal') as HTMLDivElement | null;
@@ -203,12 +206,15 @@ if (helperPairModal) {
   $opt('helperPairCancel')?.addEventListener('click', () => {
     // 取消 = "这次先不配对，照样开始"（产品决定：没配对也允许启动，此刻是静音）。
     // 坑（独立审查指出的张力）：旧代码这里是 setStatus('Stopped') + return —— 于是
-    // "探测到助手但没配对"时用户**永远无法静音启动**，只能反复看到配对框。
+    // "探测到助手但没配对"时用户**永远无法静音启动**。
+    // 顺序很关键：`setStatus('Stopped')` 会把 helperPairSkipped 复位（见 setStatus 里的注释，
+    // 那是为了覆盖"从浮窗停止"等所有停止路径），所以标志必须在它**之后**再置位，
+    // 否则 doStart 读到的还是 false → 立刻又弹一次配对框（死循环）。
     helperContinuation = null;
-    helperPairSkipped = true;
     hideHelperPairModal();
     updateSourceHint();
-    setStatus('Stopped');            // 先回到停止态，再由 doStart 正常起步（避免停在"识别中"）
+    setStatus('Stopped');
+    helperPairSkipped = true;
     void doStart();
   });
   helperPairCodeEl?.addEventListener('keydown', (e) => {
@@ -1082,6 +1088,12 @@ function setStatus(status: string, startedAt?: number) {
     levels = [];
     if (chkWaveform.checked) drawWave();
     statusWordEl.textContent = tSync(currentLang, hasStarted ? 'stateStopped' : 'stateReady');
+    // 任何"会话结束"都该重新给一次配对机会（独立审查抓的 F1）：只挂面板自己的停止按钮不够——
+    // Web 版从**字幕浮窗**停止（工具条/关画中画/关浮窗）走的是 host.stopSession()，面板只会收到
+    // STATUS_CHANGED:Stopped，复位点就漏了。放这里覆盖全部停止路径（面板按钮、浮窗、ERROR 收敛）。
+    // 注意**不能**反过来担心死循环：取消处理是先 setStatus('Stopped') 再置 helperPairSkipped=true，
+    // 顺序保证 doStart 读到的仍是 true（见 helperPairCancel 的注释）。
+    helperPairSkipped = false;
   }
 }
 
@@ -1426,11 +1438,7 @@ $('btnCompat').onclick = () => { void openCompatCheck(); };
 
 btnStop.onclick = () => {
   sendToHost({ type: 'STOP_RECOGNITION' }).catch(() => {});
-  setStatus('Stopped');
-  // 用户主动停止：把"这次先不配对"的记忆清掉（独立审查抓的 N1）。不清的话，用户点过一次
-  // 配对框的「取消」之后，本页面生命周期内**再也不会**弹配对框（`showHelperPairModal` 只有
-  // 这一个入口），助手令牌失效或用户反悔时只能靠"换走音源再切回"这条隐藏出路。
-  helperPairSkipped = false;
+  setStatus('Stopped');       // 复位 helperPairSkipped 就在 setStatus 里（覆盖浮窗停止等全部路径）
 };
 
 // —— ASR 模型缺失引导（nomodel 版安装包）——
