@@ -235,7 +235,7 @@ const strings: Record<string, Record<string, string>> = {
     helperPairErrNoCode: '助手当前没有有效配对码，请在助手窗口里查看',
     helperPairErrGeneric: '配对失败：{m}',
     helperPairErrNetwork: '连不上桌面助手，请确认它已启动（助手窗口里应显示「正在监听」）',
-    helperNotFound: '本机助手为方便获取音频而生——浏览器拿不到的整机声音由它来采集；不用它也完全可以，没启动时这个音源只会得到空音频（静音），识别照常进行。要采整机声音时，在下方链接下载并打开助手。注意：会话中途才启动的话，需停止后重新点「开始」才会连上。',
+    helperNotFound: '没探测到桌面助手，无法配对。请先在助手里点「启动」（窗口里应显示「正在监听」）；助手还没安装的话，可从音源介绍区的链接下载。注意：会话中途才启动的话，需停止后重新点「开始」才会连上。',
     // 助手窗口的「启动/暂停」总开关默认是暂停：这不是故障，是等用户去按一下。
     // 点「启动」后 server 会直接向已连客户端广播真实 PCM（无需重试、无需重新点开始）
     helperPaused: '桌面助手窗口处于「暂停」：点窗口里的「启动」即可开始出声（无需其它操作；此前识别到的内容不受影响）',
@@ -501,7 +501,7 @@ const strings: Record<string, Record<string, string>> = {
     helperPairErrNoCode: 'The helper has no valid pair code right now — check the helper window',
     helperPairErrGeneric: 'Pairing failed: {m}',
     helperPairErrNetwork: 'Cannot reach the desktop helper — make sure it is running (its window should say "listening")',
-    helperNotFound: 'The local helper exists to make audio capture easy — it captures the whole-machine sound that the browser cannot. You can also use EasySub without it: while it is not running this source simply yields silence and transcription keeps working. To capture whole-machine sound, download and start the helper via the link below. Note: if you start it in the middle of a session, stop and press Start again to connect.',
+    helperNotFound: 'No desktop helper was detected, so pairing is not possible. Press "Start" in the helper first (its window should say "listening"); if the helper is not installed yet, download it via the link in the audio source description. Note: if you start it in the middle of a session, stop and press Start again to connect.',
     helperPaused: 'The desktop helper window is paused — press "Start" in its window to begin hearing audio (nothing else needed; what has been transcribed so far is unaffected)',
     helperWsClosed: 'Disconnected from the desktop helper — stop this transcription session and press Start again to reconnect (also check that the helper window is still running)',
     helperSilentGeneric: 'Not connected to the desktop helper (it may be not started, not paired, or paused): this source is silent right now and transcription keeps working. To capture whole-machine sound, start the helper and pair with it in the panel (if a session is already running, stop it and press Start again to connect).',
