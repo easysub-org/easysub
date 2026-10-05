@@ -59,9 +59,10 @@
         <option value="tab" id="optSourceTab">当前标签页</option>
         <option value="system" id="optSourceSystem">系统音频（整个屏幕）</option>
         <option value="mic" id="optSourceMic">麦克风</option>
-        <!-- 桌面助手音源：**常驻显示**（探测不到也看得见）。介绍固定一句话、不随状态变化；
-             没启动/没配对/助手处于暂停**都不拦启动**（此刻就是静音，识别照常），
-             只有"探测到了但还没配对"才在点开始时弹配对框 —— 见 panel.ts 的 doStart/detectHelper -->
+        <!-- 桌面助手音源：**常驻显示**（探测不到也看得见）。介绍固定一句话、不随状态变化。
+             启动规则（用户澄清后的原意）：**没连上助手就不许开始**（助手没运行/没安装/没配对
+             → 停在停止态并弹说明或配对框）；助手在跑、已配对、只是处于「暂停」→ 允许开始
+             （静音帧，识别照常）。判断的是"有没有连上"，不是"有没有声音" —— 见 panel.ts 的 doStart。 -->
         <option value="helper" id="optSourceHelper">桌面助手</option>
       </select>
       <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
@@ -500,6 +501,23 @@
       <div class="unsup-actions">
         <button type="button" class="unsup-btn primary" id="sysPickConfirm"></button>
         <button type="button" class="unsup-btn" id="sysPickCancel"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 桌面助手没连上·模态（两端共用）：**没连上就不该开始**——这条音源完全依赖本机助手，
+       助手没运行/没安装时点开始只会得到一场静音会话（用户实测反馈：这就是个坑）。
+       与配对框的区别：配对框是"连得上但没令牌"，这里是"根本连不上"。 -->
+  <div class="unsup-mask" id="helperOfflineModal" hidden>
+    <div class="unsup-card" role="dialog" aria-modal="true" aria-labelledby="helperOfflineTitleEl">
+      <div class="unsup-head">
+        <svg class="unsup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>
+        <span id="helperOfflineTitleEl"></span>
+      </div>
+      <p class="unsup-body" id="helperOfflineBodyEl"></p>
+      <p class="unsup-body" id="helperOfflineLinkEl"></p>
+      <div class="unsup-actions">
+        <button type="button" class="unsup-btn primary" id="helperOfflineOk"></button>
       </div>
     </div>
   </div>

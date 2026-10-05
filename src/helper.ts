@@ -97,18 +97,21 @@ export function helperBaseUrl(port: number): string {
 /**
  * 哪些助手错误码属于**静音降级**（不是故障，别把会话连模型一起拆掉）。
  *
- * 产品决定（2026-10-05）：桌面助手音源"没启动/没配对/暂停"都是常态，此刻就是静音，
- * 识别照常跑。扩展端 offscreen 与 Web 宿主必须用同一份清单——两处各写一份正是上一轮
- * 审查抓到的"两端行为不一致"。
+ * 规则（用户澄清后的原意）：判断的是"**有没有连上**"，不是"有没有声音"。
+ *   * 没连上 → **不该开始**：面板那层直接拦（`!helperInfo` 弹说明框、未配对弹配对框），
+ *     万一还是连不上（握手被拒），走 `never_connected` → ERROR 把会话停掉，绝不留一场
+ *     "看着在跑、其实永远没字幕"的空会话。
+ *   * 连上了但暂时没声音（助手窗口处于「暂停」）→ 静音降级，会话照常跑。
+ *   * 连上过之后掉线（助手中途退出）→ 也保持静音降级，不拆会话（用户只是没声音）。
  *
  * 逐个说明：
- *   * `connect_failed` / `ws_closed` —— 助手没在运行、端口不对、进程中途退出；
- *   * `paused` —— 助手窗口的总开关（**默认暂停**）：助理对 `start` 回 ERR_PAUSED；
+ *   * `connect_failed` —— WebSocket 都没构造出来（端口非法 / CSP 拦了 ws://127.0.0.1）；
+ *   * `ws_closed` —— **连上过**之后断开（助手中途退出）；
+ *   * `paused` —— 助手窗口的总开关（**默认暂停**）：助手对 `start` 回 ERR_PAUSED；
  *   * `forbidden` / `not_paired` —— 令牌没被接受：页面需要重新配对，但会话本身照常跑，
  *     把它当 ERROR 会平白拆掉一整场。**注意（独立审查实测）：坏令牌时助手是在握手层回
- *     HTTP 403，浏览器只给 onclose，页面实际看到的是 `ws_closed`；这两个码只可能出现在
- *     `/api/pair` 的响应里**（那条走 helperErrorMessage，不经过这里）。列进来是防御未来
- *     协议变化 —— 真出现时也应该是"静音 + 提示重配"，而不是拆会话。
+ *     HTTP 403，浏览器只给 onclose，页面实际看到的是"从没连上"→ `never_connected`；这两个码
+ *     只可能出现在 `/api/pair` 的响应里**，列进来是防御未来协议变化。
  */
 const HELPER_SILENT_CODES = ('connect_failed,ws_closed,paused,forbidden,not_paired').split(',');
 
@@ -305,6 +308,8 @@ export class HelperSource {
   private opts: HelperSourceOptions;
   private ws: WebSocket | null = null;
   private stopping = false;
+  /** 这次连接是否**真的建立过**（onopen 过的）。用来区分"启动失败"与"运行中掉线"。 */
+  private opened = false;
   private sampleRate = HELPER_SAMPLE_RATE;
 
   constructor(opts: HelperSourceOptions) {
@@ -329,6 +334,7 @@ export class HelperSource {
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
     ws.onopen = () => {
+      this.opened = true;
       this.log('已连接，请求开始采集');
       try {
         ws.send(JSON.stringify({ type: 'start', source: this.opts.source || 'system' }));
@@ -341,6 +347,15 @@ export class HelperSource {
     ws.onclose = () => {
       this.ws = null;
       if (this.stopping) return;
+      // 坑（用户澄清的规则："没连上就不该开始"）：**从没连上过**与"连上后断了"必须分开——
+      //   * 从没连上（握手被拒/助手刚退出）：它就是一次失败的启动，必须走 ERROR 把会话停掉，
+      //     否则页面看着在跑、其实一句字幕都不会有（用户抱怨的就是这个）；
+      //   * 连上过再断（助手中途退出）：保持静音降级，不拆会话（决定 3）。
+      // 协议里握手相关的两个码不是静音码，所以 ERROR 分支会收敛掉这场会话。
+      if (!this.opened) {
+        this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperNeverConnected'), 'never_connected');
+        return;
+      }
       // 非主动关闭：明确告诉用户，别让它变成"界面在跑、永远没字幕"的幽灵会话
       this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperWsClosed'), 'ws_closed');
     };
