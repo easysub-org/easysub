@@ -15,7 +15,7 @@
 // 误判为"标签页已关闭"而整个清理掉（画面无字幕、麦克风灯灭，且没有任何提示）。
 // 所以：引擎建一次，sink 通过可变引用取"当前端口"。
 import { AsrEngine } from './asr-engine';
-import { HelperSource } from './helper';
+import { HelperSource, isHelperSilentCode } from './helper';
 import { tSync } from './i18n';
 
 let port: chrome.runtime.Port;
@@ -116,6 +116,11 @@ function setupPort() {
                 startHelperSource(msg.helperPort, msg.helperToken, msg.lang);
               })
               .catch(() => { /* init 失败内部只 log 不上抛；这里兜底避免未处理的拒绝 */ });
+          } else {
+            // 非 helper 的 INIT：必须停掉上一场的 helper WS（Web 宿主在 startSession 里也这么做，
+            // 两端不对称正是独立审查抓的）。否则旧 WS 还活着、继续把 PCM 喂进**新**管道：
+            // 同一配置下 Running 中再来一次 START 时会串音，而且没人负责关它。
+            stopHelperSource();
           }
           break;
         }
@@ -230,7 +235,8 @@ function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
       // background 会 cleanupAll 连模型一起拆，比"改前白拦一次"更糟（复审抓到的）。
       // 'paused' 必须在清单里：助手窗口默认就是暂停，连接后对 start 必回 ERR_PAUSED，
       // 这是最高频的一条；其余未知 code（真正故障）仍走 ERROR。
-      if (code === 'connect_failed' || code === 'ws_closed' || code === 'paused') {
+      // 清单与 Web 宿主共用 isHelperSilentCode（两端各写一份正是审查抓过的不一致）。
+      if (isHelperSilentCode(code)) {
         toPanel({ type: 'HELPER_SILENT', message });
         return;
       }

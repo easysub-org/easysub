@@ -239,9 +239,9 @@ const strings: Record<string, Record<string, string>> = {
     // 助手窗口的「启动/暂停」总开关默认是暂停：这不是故障，是等用户去按一下。
     // 点「启动」后 server 会直接向已连客户端广播真实 PCM（无需重试、无需重新点开始）
     helperPaused: '桌面助手窗口处于「暂停」：点窗口里的「启动」即可开始出声（无需其它操作；此前识别到的内容不受影响）',
-    helperWsClosed: '与桌面助手的连接已断开：停止本场识别后重新点「开始」即可恢复（也可确认助手窗口是否还在运行）',
+    helperWsClosed: '与桌面助手的连接已断开：请先确认助手窗口还在运行，然后停止本场识别、再点「开始」重新连接',
     helperSilentGeneric: '尚未连接到桌面助手（未启动、未配对或处于暂停都有可能）：桌面助手音源此刻是静音，识别照常进行。要采整机声音，请启动助手并在面板里完成配对（若本场识别已开始，需停止后重新开始才会连上）。',
-    helperWsError: '无法连接桌面助手',
+    helperCorsOriginHint: '另外：本页地址（{origin}）不在本机，助手默认只放行回环地址上的页面与浏览器扩展，所以探测被浏览器拦掉了。请改用 http://127.0.0.1 打开本页，或让助手以 --allow-cors-all 启动（等价于 --allow-origin {origin}）。',
     sourceHintMic: '识别麦克风采集到的声音。首次开始识别时会在悬浮字幕窗上弹出 Chrome 授权框（可在其中选择设备，浏览器会记住），字幕显示在悬浮窗。',
     micDenied: '未获得麦克风权限或设备不可用，识别未开始',
     // NotFoundError（系统无可用麦克风 / Windows 隐私设置禁用）时 Chrome 不弹授权框直接拒，
@@ -503,9 +503,9 @@ const strings: Record<string, Record<string, string>> = {
     helperPairErrNetwork: 'Cannot reach the desktop helper — make sure it is running (its window should say "listening")',
     helperNotFound: 'No desktop helper was detected, so pairing is not possible. Press "Start" in the helper first (its window should say "listening"); if the helper is not installed yet, download it via the link in the audio source description. Note: if you start it in the middle of a session, stop and press Start again to connect.',
     helperPaused: 'The desktop helper window is paused — press "Start" in its window to begin hearing audio (nothing else needed; what has been transcribed so far is unaffected)',
-    helperWsClosed: 'Disconnected from the desktop helper — stop this transcription session and press Start again to reconnect (also check that the helper window is still running)',
+    helperWsClosed: 'Disconnected from the desktop helper — first check that its window is still running, then stop this session and press Start again to reconnect',
     helperSilentGeneric: 'Not connected to the desktop helper (it may be not started, not paired, or paused): this source is silent right now and transcription keeps working. To capture whole-machine sound, start the helper and pair with it in the panel (if a session is already running, stop it and press Start again to connect).',
-    helperWsError: 'Cannot connect to the desktop helper',
+    helperCorsOriginHint: 'Note: this page is served from {origin}, which is not a loopback address — the helper only allows loopback pages and browser extensions by default, so the browser blocked the probe. Open this page via http://127.0.0.1, or start the helper with --allow-cors-all (equivalent to --allow-origin {origin}).',
     sourceHintMic: 'Transcribes what the microphone hears. On the first start, Chrome\'s permission prompt appears on the floating subtitle window (pick your device there — the browser remembers it); subtitles show in the floating window.',
     micDenied: 'Microphone permission denied or device unavailable — recognition not started',
     micNotFound: 'No microphone device detected — recognition not started. Make sure a mic is connected and usable; if it still fails, check that the OS privacy settings allow apps to access the microphone (Windows: Settings → Privacy & security → Microphone).',

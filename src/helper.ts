@@ -42,6 +42,14 @@ export interface HelperInfo {
   port: number;
   version: string;
   paired: boolean;
+  /**
+   * 第二步（带 `?token=` 的复探）**是否真的拿到过答案**。
+   *
+   * 坑（独立审查抓的）：第二步是带令牌问"这个浏览器配过没有"，它可能瞬时失败（助手重启中、
+   * 端口抖动），此时 `paired` 只能退回第一步的 false —— 调用方若据此判定"没配对"，
+   * 已配好的浏览器会被要求重新配对。所以这里显式区分"助手说没配"与"没问出来"。
+   */
+  tokenChecked: boolean;
   /** 助手窗口的总开关是否处于暂停（默认暂停）：暂停时助手不采音频，只推静音帧 */
   paused: boolean;
   lang: string;
@@ -67,7 +75,14 @@ export interface PairSuccess {
   label: string;
 }
 
-export function helperPorts(preferred?: number, full = true): number[] {
+/**
+ * 要探测的端口列表。`full=false`（默认）只扫开头几个，`full=true` 扫满 20 个（+ 记住的端口）。
+ *
+ * 坑：默认值必须与这里的文档一致（独立审查抓到签名写着 `full = true` 而文档说"默认 false"）。
+ * 默认取 false 是有意的——裸调一次 `helperPorts()` 不该在本机刷出 21 条失败请求。
+ * 两个调用方（面板 detectHelper 与 probeHelper）都**显式**传这个参数，所以改动不影响它们。
+ */
+export function helperPorts(preferred?: number, full = false): number[] {
   const out: number[] = [];
   if (preferred) out.push(preferred);
   const last = full ? HELPER_PORT_SCAN : HELPER_PROBE_QUICK_PORTS;
@@ -77,6 +92,25 @@ export function helperPorts(preferred?: number, full = true): number[] {
 
 export function helperBaseUrl(port: number): string {
   return `http://127.0.0.1:${port}`;
+}
+
+/**
+ * 哪些助手错误码属于**静音降级**（不是故障，别把会话连模型一起拆掉）。
+ *
+ * 产品决定（2026-10-05）：桌面助手音源"没启动/没配对/暂停"都是常态，此刻就是静音，
+ * 识别照常跑。扩展端 offscreen 与 Web 宿主必须用同一份清单——两处各写一份正是上一轮
+ * 审查抓到的"两端行为不一致"。
+ *
+ * 逐个说明：
+ *   * `connect_failed` / `ws_closed` —— 助手没在运行、端口不对、进程中途退出；
+ *   * `paused` —— 助手窗口的总开关（**默认暂停**）：助理对 `start` 回 ERR_PAUSED；
+ *   * `forbidden` / `not_paired` —— 令牌没被接受：页面需要重新配对，但会话本身照常跑，
+ *     把它当 ERROR 会平白拆掉一整场（潜在误标，独立审查指出）。
+ */
+const HELPER_SILENT_CODES = ('connect_failed,ws_closed,paused,forbidden,not_paired').split(',');
+
+export function isHelperSilentCode(code?: string): boolean {
+  return !!code && HELPER_SILENT_CODES.indexOf(code) >= 0;
 }
 
 // 令牌放 query：WS 与 fetch 都能用同一种方式带（助手同时支持 X-Easysub-Token 头）
@@ -138,15 +172,20 @@ async function probePort(port: number, token?: string): Promise<HelperInfo | nul
   // /api/pair/info 无鉴权且必定 200；拿到 __status 说明被拒（CORS/其它服务），不算助手
   if (!first || first.__status || first.app !== 'easysub-helper') return null;
   let data = first;
+  let tokenChecked = false;
   if (token) {
     const withToken = await fetchJson(`${url}?token=${encodeURIComponent(token)}`, undefined,
       PROBE_TIMEOUT_MS).catch(() => null);
-    if (withToken && !withToken.__status) data = withToken;
+    if (withToken && !withToken.__status) {
+      data = withToken;
+      tokenChecked = true;              // 只有真的问出来了才敢说"助手答了"
+    }
   }
   return {
     port,
     version: String(data.version || ''),
     paired: data.paired === true,
+    tokenChecked,
     paused: data.paused === true,
     lang: String(data.lang || ''),
     platform: String(data.platform || ''),
