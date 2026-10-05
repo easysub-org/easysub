@@ -139,8 +139,10 @@ async function startHelperSource(isStale: () => boolean) {
   // 这里必须再查一次代次，否则会留下一条没人关闭的 WS（助手会一直推流）。
   if (isStale()) return;
   if (!session) {
-    // 产品决定（2026-10-05）：没配对/没启动是常态 → 静音音源 + 日志一句话，**不拆会话**
-    emitToPanel({ type: 'HELPER_SILENT', message: tSync(msgLang, 'helperNotFound') });
+    // 缺会话 = 没配对（可能没启动助手，也可能开着但没配过/暂停）——全是常态，当静音音源。
+    // 文案用对三种成因都成立的句子，别说"没在运行"（用户窗口可能开着）；且这是单行日志区，
+    // 没有链接可点，别写"在下方链接下载"。
+    emitToPanel({ type: 'HELPER_SILENT', message: tSync(msgLang, 'helperSilentGeneric') });
     return;
   }
   helper = new HelperSource({

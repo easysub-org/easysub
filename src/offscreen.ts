@@ -208,9 +208,11 @@ function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
   const port = Number(portRaw);
   const token = String(tokenRaw || '');
   if (!port || !token) {
-    // 面板没配过对是**常态**（用户没启动助手就直接开始了）：当静音音源处理，
-    // 不发 ERROR（那会把整场会话拆掉）——面板会从 HELPER_SILENT 得知"当前是静音"。
-    toPanel({ type: 'HELPER_SILENT', message: tSync(helperLang, 'helperNotFound') });
+    // 缺令牌 = 没配对（可能压根没启动助手，也可能助手开着但没配过/处于暂停——
+    // 面板只在「探测到且未暂停」时才弹配对框）。这些全是常态：当静音音源处理，
+    // 不发 ERROR（那会把整场会话拆掉）。文案必须对三种成因都成立，别说"没在运行"
+    // ——用户明明开着助手窗口（独立审查抓的假文案）。
+    toPanel({ type: 'HELPER_SILENT', message: tSync(helperLang, 'helperSilentGeneric') });
     return;
   }
   helperSource = new HelperSource({

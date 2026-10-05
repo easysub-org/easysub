@@ -132,8 +132,8 @@ micErrOk.onclick = () => { micErrModal.hidden = true; };
 micErrModal.onclick = (e) => { if (e.target === micErrModal) micErrModal.hidden = true; };
 
 // —— 桌面助手·配对（两端共用）——
-// 产品决定（2026-10-05 修正）：音源**常驻显示**（探测结果只决定"能不能启动"与提示语；
-// 早期"探测到才显示"已废弃 —— 用户实测在 Web 版里因此找不到这个音源）；**配对成功才允许启动**。
+// 产品决定（2026-10-05 修正）：音源**常驻显示**、介绍固定一句常态文案；**没启动/没配对/
+// 暂停都不拦启动**（空音频=静音帧，识别照常）——只有「检测到了但未配对」才在点开始时弹配对框。
 // 助手会把本机音频交给任何连上来的页面，所以配对码只显示在用户自己启动的助手窗口里，
 // 它就是"用户在场"的证明；配对成功后换长期设备令牌，之后不再打扰用户。
 let helperInfo: HelperInfo | null = null;
@@ -1200,8 +1200,9 @@ selSource.onchange = () => {
 let pickConfirmPassed = false;
 async function doStart(): Promise<void> {
   const pendingSource: AudioSourceId = readSelectedSource();
-  // 桌面助手音源：**必须先配对**（配对码换来的设备令牌是助手认这个页面的唯一凭据）。
-  // 未配对 → 弹配对模态；用户提交成功后由 continuation 重新走一遍 doStart。
+  // 桌面助手音源：**没启动/没配对/暂停都不拦启动**（空音频=静音帧，识别照常）。
+  // 只有「探测到了但未配对」才弹配对模态（配对码换来的设备令牌是助手认这个页面的唯一凭据；
+  // 没有令牌，助手的 /ws 反正会拒，不如先问清楚）。用户提交成功后由 continuation 重走 doStart。
   // 位置刻意排在"系统音频·选择器说明"之前：两者互不相干，别让用户先读一遍无关说明。
   if (pendingSource === 'helper') {
     // **无条件重探一次**：助手的状态在面板打开之后可能已经变了（用户刚去窗口点了「启动」或
