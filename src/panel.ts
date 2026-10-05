@@ -202,11 +202,12 @@ if (helperPairModal) {
   });
 }
 
-// 探测本机助手：**音源常驻显示**，探测结果只用来决定"能不能启动"与提示语。
-// 产品要求（2026-10-05 修正）：不再"探测不到就藏起来"——用户实测在 dist-web 里根本找不到这个
+// 探测本机助手：**音源常驻显示**，介绍固定一句常态文案（不再随启动/配对状态切换）。
+// 产品决定（2026-10-05 修正）：不再"探测不到就藏起来"——用户实测在 dist-web 里根本找不到这个
 // 音源（CORS/端口一变探测就失败），于是连"该怎么配对"都无从下手。现在改成：
-// 音源一直在列表里，选中后由提示语说明当前状态（没检测到 / 未配对 / 已暂停 / 可用），
-// **并且必须配对成功才能启动**（未配对 → 弹配对模态；没检测到 → 弹模态并说明原因）。
+// 音源一直在列表里；**没启动/没配对/暂停都不拦启动**（空音频=静音帧，识别照常），
+// 只有"检测到但未配对"才在点开始时弹配对模态（没有令牌，助手的 /ws 反正会拒，先问清楚）。
+// 探测结果仍有两个用处：配对框要用端口；端口语/助手重启后回写漂移的端口。
 async function detectHelper(full = false) {
   const saved = await loadHelperSession();
   helperSession = null;
@@ -591,17 +592,12 @@ function updateSourceHint() {
     return;
   }
   if (selSource.value === 'helper') {
-    // 四种状态都要明确说清楚（而不是给一句"没有声音"让用户自己猜）：
-    // 没检测到 / 助手窗口暂停 / 检测到但未配对 / 已配对可用
-    let key = 'helperNotFound';
-    if (helperInfo) {
-      if (helperInfo.paused) key = 'helperPaused';
-      else if (!helperSession) key = 'sourceHintHelperUnpaired';
-      else key = 'sourceHintHelper';
-    }
+    // 产品决定（2026-10-05）：**不再区分"启没启动/配没配对"**——一句常态介绍固定显示。
+    // 助手是否在跑只影响"有没有声音"（没启动 = 空音频/静音帧，识别照常），
+    // 不影响这个音源的说明。（原先是四种状态各一句，介绍跟着探测结果变来变去。）
     // 助手音源是**实验性**的：提示里附上助手仓库的 Releases 地址（还没装 / 想升级的人
     // 直接点过去）。用 DOM 拼 <a> 而不是 innerHTML —— 文案来自 i18n，不该被当 HTML 解析。
-    sourceHintEl.textContent = tSync(currentLang, key) + ' ' + tSync(currentLang, 'helperReleases') + ' ';
+    sourceHintEl.textContent = tSync(currentLang, 'sourceHintHelper') + ' ' + tSync(currentLang, 'helperReleases') + ' ';
     const helperLink = document.createElement('a');
     helperLink.href = HELPER_RELEASES_URL;
     helperLink.target = '_blank';
@@ -1212,24 +1208,14 @@ async function doStart(): Promise<void> {
     // 「暂停」）。用缓存的 helperInfo 判断会形成死循环 —— 提示"请在助手窗口点启动"，用户去点了、
     // 回来再点「开始」，仍然读到旧的 paused=true。Web 版页面常驻，必然复现。
     await detectHelper(true);
-    if (!helperSession) {
-      if (!helperInfo) {
-        // 没检测到助手：把原因当面说清楚（配对框照样给出来，助手起来后用户可直接提交）
-        showHelperPairModal();
-        showHelperPairError(tSync(currentLang, 'helperNotFound'));
-        setStatus('Stopped');
-        return;
-      }
+    // 产品决定（2026-10-05）：**不再要求助手已启动/已配对才能点开始**。
+    // 助手没启动 → 这条音源就是空音频（静音帧），识别照常进行，用户看到的只是"没字"；
+    // 助手在跑但没配对 → 走原有配对框（没有令牌，助手的 /ws 反正会拒，不如先问清楚）。
+    // 暂停 → 助手推的也是静音帧，同样不拦。
+    if (!helperSession && helperInfo && !helperInfo.paused) {
       // 检测到了但未配对：弹配对框；配对成功后由 continuation 重走 doStart
       helperContinuation = () => { void doStart(); };
       showHelperPairModal();
-      setStatus('Stopped');
-      return;
-    }
-    if (helperInfo?.paused) {
-      // 助手窗口处于「暂停」（默认状态）：**先别启动**。否则助手会回一个 paused ERROR，
-      // background 收到 ERROR 会把整场会话（含刚加载好的模型）拆掉，用户还得从头再来一遍。
-      updateSourceHint();
       setStatus('Stopped');
       return;
     }
@@ -2158,6 +2144,11 @@ onMessageFromHost((msg) => {
       break;
     case 'LOG':
       log(msg.message);
+      break;
+    case 'HELPER_SILENT':
+      // 桌面助手没启动/没连上/处于暂停：不是故障——会话照常跑（这个音源此刻就是静音）。
+      // 只在日志区提醒一句（**不带**"错误："前缀，它不是错误），不置 Stopped、不弹模态。
+      log(String(msg.message || ''));
       break;
     case 'ERROR':
       // 坑：errorPrefix 的 {m} 是占位符，须手动 replace（与 searchHits 同一套约定）

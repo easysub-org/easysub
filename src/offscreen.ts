@@ -208,8 +208,9 @@ function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
   const port = Number(portRaw);
   const token = String(tokenRaw || '');
   if (!port || !token) {
-    // 面板应当先完成配对并把令牌带上；走到这里说明 START 组装漏了字段
-    toPanel({ type: 'ERROR', message: tSync(helperLang, 'helperWsError') });
+    // 面板没配过对是**常态**（用户没启动助手就直接开始了）：当静音音源处理，
+    // 不发 ERROR（那会把整场会话拆掉）——面板会从 HELPER_SILENT 得知"当前是静音"。
+    toPanel({ type: 'HELPER_SILENT', message: tSync(helperLang, 'helperNotFound') });
     return;
   }
   helperSource = new HelperSource({
@@ -220,6 +221,16 @@ function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
     onPcm: (f32, rate) => engine.feedMicChunk(f32, rate),
     onError: (message, code) => {
       console.log('[TM Offscreen] 桌面助手错误:', code, message);
+      // 产品决定（2026-10-05）：助手没启动/处于暂停都是**常态**而不是故障——这个音源
+      // 本来就允许"没启动也能开始"（空音频=静音帧，识别照常）。所以这三类只降级成
+      // HELPER_SILENT（面板日志一句话），不再把整场会话当 ERROR 拆掉——此前一发 ERROR，
+      // background 会 cleanupAll 连模型一起拆，比"改前白拦一次"更糟（复审抓到的）。
+      // 'paused' 必须在清单里：助手窗口默认就是暂停，连接后对 start 必回 ERR_PAUSED，
+      // 这是最高频的一条；其余未知 code（真正故障）仍走 ERROR。
+      if (code === 'connect_failed' || code === 'ws_closed' || code === 'paused') {
+        toPanel({ type: 'HELPER_SILENT', message });
+        return;
+      }
       toPanel({ type: 'ERROR', message });
     },
     log: (message) => engine.log(message),

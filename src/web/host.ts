@@ -139,8 +139,8 @@ async function startHelperSource(isStale: () => boolean) {
   // 这里必须再查一次代次，否则会留下一条没人关闭的 WS（助手会一直推流）。
   if (isStale()) return;
   if (!session) {
-    emitToPanel({ type: 'ERROR', message: tSync(msgLang, 'helperNotFound') });
-    stopSession();
+    // 产品决定（2026-10-05）：没配对/没启动是常态 → 静音音源 + 日志一句话，**不拆会话**
+    emitToPanel({ type: 'HELPER_SILENT', message: tSync(msgLang, 'helperNotFound') });
     return;
   }
   helper = new HelperSource({
@@ -149,7 +149,13 @@ async function startHelperSource(isStale: () => boolean) {
     source: 'system',
     lang: msgLang,
     onPcm: (f32, rate) => getEngine().feedMicChunk(f32, rate),
-    onError: (message) => {
+    onError: (message, code) => {
+      // 与扩展端 offscreen 同一套降级（复审抓的不一致）：没启动/暂停是常态，
+      // 空音频=静音帧、识别照常——只记日志，不把整场会话连模型一起拆掉。
+      if (code === 'connect_failed' || code === 'ws_closed' || code === 'paused') {
+        emitToPanel({ type: 'HELPER_SILENT', message });
+        return;
+      }
       emitToPanel({ type: 'ERROR', message });
       stopSession();
     },
