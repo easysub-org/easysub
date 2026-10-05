@@ -320,9 +320,9 @@ export class HelperSource {
       ws = new WebSocket(helperWsUrl(this.opts.port, this.opts.token));
     } catch (e: any) {
       // 坑：这里**不能**把浏览器给的原始异常串当提示——Chrome 这类消息通常内嵌完整 URL
-      // （含 `?token=`），会被面板日志原样记下来（独立审查指出）。给本地化文案，原始串只进
-      // 控制台日志，便于排查但不泄露令牌。
-      console.log('[桌面助手] WebSocket 构造失败:', e);
+      // （含 `?token=`），会被面板日志原样记下来（独立审查指出）。所以 UI 走本地化文案，
+      // 控制台也只留异常**名字**（连名字都别带 URL）。
+      console.log('[桌面助手] WebSocket 构造失败:', e?.name || 'Error');
       this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperConnectFailed'), 'connect_failed');
       return;
     }

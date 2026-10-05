@@ -129,18 +129,17 @@ function getEngine(): AsrEngine {
 // 幂等——ERROR / 浮窗关闭 / 用户点停止 三条路都会走到这里。
 // 导出给面板用：浮窗失联（被导航走/被浏览器丢弃）时面板也要能收敛整场会话。
 
-// 本页是不是"回环地址上的页面"——助手默认只放行回环页面 + 浏览器扩展协议。
-// 坑（独立审查抓的）：别只比 4 个字面量。127.0.0.2 / 127.1 / localhost.（带点）都是回环，
-// 而 file:// 下 location.origin 是字符串 "null" —— 那些情况都不该给"跨域被拦"的指引。
+// 本页是不是"回环地址上的页面"——判定必须与助手那边的白名单**逐字对齐**（助手用
+// `security.is_loopback_origin`：`localhost` / `localhost.localdomain` 两个字面量，或
+// Python `ipaddress.ip_address(host).is_loopback`，即 IPv4 只有 127.0.0.0/8、IPv6 只有 ::1）。
+// 坑（独立审查抓的）：写宽了比写窄了更糟 —— 把 `0.0.0.0` / `127.1` / `localhost.` / `*.localhost`
+// 也当回环时，助手其实**会拒绝**它们，而这里却因此不给"站点没被放行"的指引，用户只剩静音。
 function isLoopbackPage(): boolean {
   const host = location.hostname.toLowerCase();
-  if (!host || host === 'null') return false;
-  if (host === 'localhost' || host === 'localhost.' || host.endsWith('.localhost')) return true;
-  if (host === '::1' || host === '[::1]') return true;
-  if (host === '0.0.0.0') return true;                  // 本机通配，实操上等同回环
+  if (host === 'localhost' || host === 'localhost.localdomain') return true;
+  if (host === '::1' || host === '[::1]') return true;      // 浏览器给的是带方括号的形式
   const v4 = host.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) return v4.slice(1).every((part) => Number(part) <= 255);
-  return host === '127.1';                              // 缩写形式
+  return !!v4 && v4.slice(1).every((part) => Number(part) <= 255);
 }
 
 // 坑（独立审查抓的 major）：Web 版部署在**别的域名**（官方发布的 GitHub Pages、预览站等）时，
@@ -154,7 +153,11 @@ function withOriginHint(message: string): string {
     // 坑：这个文案里 `{origin}` 出现**两次**（"本页地址（{origin}）"与 "--allow-origin {origin}"），
     // 而 String.replace 只换第一个 —— 第二条命令会原样打出 `{origin}`（独立审查实测）。
     // 用 split/join 全量替换（不依赖 replaceAll 的 ES2021 目标）。
-    const hint = tSync(msgLang, 'helperCorsOriginHint').split('{origin}').join(location.origin);
+    // file:// 页面没有 origin（字符串 "null"）：写成 "file://" 也比"本页地址（null）"可读。
+    const origin = location.origin && location.origin !== 'null'
+      ? location.origin
+      : location.protocol + '//';
+    const hint = tSync(msgLang, 'helperCorsOriginHint').split('{origin}').join(origin);
     return message + ' ' + hint;
   } catch {
     return message;

@@ -1427,6 +1427,10 @@ $('btnCompat').onclick = () => { void openCompatCheck(); };
 btnStop.onclick = () => {
   sendToHost({ type: 'STOP_RECOGNITION' }).catch(() => {});
   setStatus('Stopped');
+  // 用户主动停止：把"这次先不配对"的记忆清掉（独立审查抓的 N1）。不清的话，用户点过一次
+  // 配对框的「取消」之后，本页面生命周期内**再也不会**弹配对框（`showHelperPairModal` 只有
+  // 这一个入口），助手令牌失效或用户反悔时只能靠"换走音源再切回"这条隐藏出路。
+  helperPairSkipped = false;
 };
 
 // —— ASR 模型缺失引导（nomodel 版安装包）——
