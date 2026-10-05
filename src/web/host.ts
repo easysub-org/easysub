@@ -150,6 +150,7 @@ async function startHelperSource(isStale: () => boolean) {
     token: session.token,
     source: 'system',
     lang: msgLang,
+    // 与扩展端同一条通道：PCM 交给引擎，电平由引擎自己算（不给 helper 开专属通路）
     onPcm: (f32, rate) => getEngine().feedMicChunk(f32, rate),
     onError: (message, code) => {
       // 与扩展端 offscreen 同一套降级（复审抓的不一致）：没启动/暂停是常态，

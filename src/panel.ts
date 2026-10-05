@@ -758,7 +758,23 @@ document.querySelectorAll<HTMLButtonElement>('.seg').forEach(b => {
 const LEVEL_BARS = 60; // 保留最近 60 个采样（~120ms/条 ≈ 7 秒历史）
 let levels: number[] = [];
 let waveRaf = 0;
+//: 最近一次收到 LEVEL 的时刻。用来判断"到底还有没有电平数据在来"——见 decayLevelsIfStale。
+let lastLevelAt = 0;
+let lastDecayAt = 0;
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+// 无 LEVEL 时的兜底采样（用户实测「波形不动」）：助手没连上、助手处于暂停、采集彻底停掉
+// 时，一条 LEVEL 都不会来，波形会**冻结在最后一个形状**上——看着像卡死，其实是没数据。
+// 这里按 ~120ms 补一个 0，让它自己落回基线："没声音"就该看起来是空的。
+// 只在 Running 时补：停止后本来就画静止基线。
+function decayLevelsIfStale() {
+  if (lastStatus !== 'Running') return;
+  const now = Date.now();
+  if (now - lastLevelAt < 300 || now - lastDecayAt < 120) return;
+  lastDecayAt = now;
+  levels.push(0);
+  if (levels.length > LEVEL_BARS) levels.shift();
+}
 
 function drawWave() {
   const dpr = window.devicePixelRatio || 1;
@@ -771,6 +787,7 @@ function drawWave() {
   }
   const ctx = waveCanvas.getContext('2d');
   if (!ctx) return;
+  decayLevelsIfStale();     // 没数据时自己落回基线，别冻结在上一帧
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, cssW, cssH);
   const gap = 2;
@@ -2135,6 +2152,7 @@ onMessageFromHost((msg) => {
       const v = Math.max(0, Math.min(1, Number(msg.v) || 0));
       levels.push(v);
       if (levels.length > LEVEL_BARS) levels.shift();
+      lastLevelAt = Date.now();   // 有数据在来，别触发兜底补零
       // 减弱动态模式下无 rAF 循环，随消息事件驱动重绘（~120ms 一条，足够顺滑）
       if (reduceMotion.matches && lastStatus === 'Running' && chkWaveform.checked) drawWave();
       break;

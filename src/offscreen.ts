@@ -219,7 +219,8 @@ function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
     port,
     token,
     source: 'system',
-    // 引擎会按 16k 直接消费；它内部自己算电平（recordLevel），所以这里不必再报 LEVEL
+    // PCM 与其它音源走**同一条**注入通道（feedMicChunk → recordLevel → LEVEL），
+    // 所以这里不需要任何 helper 专属的电平/波形处理——引擎自己会算。
     onPcm: (f32, rate) => engine.feedMicChunk(f32, rate),
     onError: (message, code) => {
       console.log('[TM Offscreen] 桌面助手错误:', code, message);
