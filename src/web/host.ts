@@ -190,7 +190,7 @@ async function startHelperSource(isStale: () => boolean) {
     onPcm: (f32, rate) => getEngine().feedMicChunk(f32, rate),
     onError: (message, code) => {
       // 与扩展端 offscreen 同一套降级（复审抓的不一致）：没启动/暂停/令牌没被接受
-      // 都是常态，空音频=静音帧、识别照常——只记日志，不把整场会话连模型一起拆掉。
+      // 属于"连着但不该拆会话"（助手暂停、连上后掉线）——只记日志，不连模型一起拆掉。
       // 清单共用 helper.isHelperSilentCode（别再各写一份，那就是不一致的来源）。
       if (isHelperSilentCode(code)) {
         emitToPanel({ type: 'HELPER_SILENT', message });

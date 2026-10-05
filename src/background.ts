@@ -259,7 +259,7 @@ chrome.runtime.onConnect.addListener((port) => {
         if (bgLevels.length > LEVEL_SNAPSHOT_MAX) bgLevels.shift();
       }
       // 悬浮窗只消费这三类 FW_POP 消息（其余显示类已由 FW_CT 扇出覆盖，避免重复）
-      // HELPER_SILENT：桌面助手没启动/连接断开的**常态降级**（空音频=静音帧，识别照常）。
+      // HELPER_SILENT：助手暂停 / 连上后掉线的**静音降级**（连着，只是暂时没声音）。
       // 它不是故障：不惊动悬浮窗、不走 ERROR 的 cleanupAll（那会把模型整场拆掉），
       // 只进面板日志区提醒一句"助手没连上，当前是静音"。
       if (p.type === 'HELPER_SILENT') {
