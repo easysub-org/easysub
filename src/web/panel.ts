@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 纯 Web 版面板入口：共享控制面板（src/panel.ts）+ 本文件的宿主接线。
 //
 // 宿主侧要做的四件事：

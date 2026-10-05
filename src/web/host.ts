@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 纯 Web 版宿主：扮演扩展里 background + offscreen 两个角色的合体。
 //
 // 架构对照（为什么这么分）：
@@ -17,6 +19,7 @@
 //   少任何一条都会表现成"看起来一样、用起来不一样"（用户已验证过的那些 bug）。
 import { AsrEngine } from '../asr-engine';
 import { MicCapture, micErrorText } from '../mic-capture';
+import { HelperSource, loadHelperSession } from '../helper';
 import { emitToPanel, onHostMessage, resolveUrl, storage } from '../platform';
 import { tSync } from '../i18n';
 import { appendTranscript, attachTranscriptTranslation } from '../transcript-store';
@@ -37,6 +40,8 @@ let engine: AsrEngine | null = null;
 // 会话语言（由面板随 START_RECOGNITION 带来）：错误文案按它取 i18n
 let msgLang = 'zh_CN';
 let mic: MicCapture | null = null;
+// 桌面助手音频源（本机助手进程采系统音频，经 WS 送 PCM）
+let helper: HelperSource | null = null;
 let status = 'Stopped';
 let startedAt = 0;
 let locked = false;
@@ -123,6 +128,44 @@ function getEngine(): AsrEngine {
 // 停止：停引擎、停麦克风采集、收敛状态、关字幕浮窗。
 // 幂等——ERROR / 浮窗关闭 / 用户点停止 三条路都会走到这里。
 // 导出给面板用：浮窗失联（被导航走/被浏览器丢弃）时面板也要能收敛整场会话。
+
+// 桌面助手音频源：WS 由本宿主持有（面板页就是引擎宿主），PCM 直接喂进识别管道。
+// 令牌从 storage 读——面板配对成功后会写进去，这里不重复探测（避免两处状态不一致）。
+async function startHelperSource(isStale: () => boolean) {
+  helper?.stop();
+  helper = null;
+  const session = await loadHelperSession();
+  // 加载期间用户可能已经点了停止：stopSession() 那时只 stop 了「当时的 helper」（还是 null），
+  // 这里必须再查一次代次，否则会留下一条没人关闭的 WS（助手会一直推流）。
+  if (isStale()) return;
+  if (!session) {
+    // 缺会话 = 没配对（可能没启动助手，也可能开着但没配过/暂停）——全是常态，当静音音源。
+    // 文案用对三种成因都成立的句子，别说"没在运行"（用户窗口可能开着）；且这是单行日志区，
+    // 没有链接可点，别写"在下方链接下载"。
+    emitToPanel({ type: 'HELPER_SILENT', message: tSync(msgLang, 'helperSilentGeneric') });
+    return;
+  }
+  helper = new HelperSource({
+    port: session.port,
+    token: session.token,
+    source: 'system',
+    lang: msgLang,
+    onPcm: (f32, rate) => getEngine().feedMicChunk(f32, rate),
+    onError: (message, code) => {
+      // 与扩展端 offscreen 同一套降级（复审抓的不一致）：没启动/暂停是常态，
+      // 空音频=静音帧、识别照常——只记日志，不把整场会话连模型一起拆掉。
+      if (code === 'connect_failed' || code === 'ws_closed' || code === 'paused') {
+        emitToPanel({ type: 'HELPER_SILENT', message });
+        return;
+      }
+      emitToPanel({ type: 'ERROR', message });
+      stopSession();
+    },
+    log: (m) => getEngine().log(m),
+  });
+  helper.start();
+}
+
 export function stopSession() {
   const wasRunning = sessionActive || status !== 'Stopped' || !!mic || !!engine?.hasPipeline();
   // 作废在途的 START 异步体（同扩展 cleanupAll 的 sessionEpoch++）
@@ -130,6 +173,8 @@ export function stopSession() {
   sessionActive = false;
   mic?.stop();
   mic = null;
+  helper?.stop();
+  helper = null;
   engine?.stop();
   status = 'Stopped';
   startedAt = 0;
@@ -207,12 +252,14 @@ export async function preAcquireAudio(source: string): Promise<MediaStream | nul
 }
 
 async function startSession(msg: any) {
-  const source = msg.source === 'mic' ? 'mic' : 'system';
+  const source = msg.source === 'mic' ? 'mic' : msg.source === 'helper' ? 'helper' : 'system';
   // 会话语言：错误文案要用会话启动时的语言（面板切语言后重开会话才变，与扩展一致）
   if (msg.lang) msgLang = msg.lang;
   // 先停干净上一场（含上一场的 getDisplayMedia 轨道），避免两份采集并存
   mic?.stop();
   mic = null;
+  helper?.stop();
+  helper = null;
   engine?.stop();
   const myEpoch = ++sessionEpoch;
   const stale = () => myEpoch !== sessionEpoch;
@@ -276,6 +323,10 @@ async function startSession(msg: any) {
         // 不再自己调 getDisplayMedia（那时已不在用户手势内，必失败）
         preStream,
       });
+      // 桌面助手：init 之后才接音频（此前 feedMicChunk 没有管道，块会被丢弃）。
+      // stale() 必须**再查一次**：加载模型期间用户可能已经点了停止，迟到的
+      // startHelperSource 会开出一条没人负责关的 WS（助手会一直推流）。
+      if (source === 'helper' && !stale()) void startHelperSource(stale);
     } catch (e: any) {
       // 这条 catch 是防御性的（引擎 init 内部各失败路只 log 不上抛），但真走到时
       // preStream 也必须释放，否则屏幕共享指示灯为一场不存在的会话常亮。

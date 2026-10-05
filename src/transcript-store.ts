@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 字幕记录持久化（跨宿主共用）：扩展 background 与 Web 版宿主都走这一份，
 // 保证两端的存储契约、裁剪策略、译文挂载语义完全一致。
 //

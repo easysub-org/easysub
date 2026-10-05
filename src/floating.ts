@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 扩展悬浮字幕窗宿主（floating.html + floating.js）。
 //
 // 窗口生命周期由 background 决定（START 时按音源自动开合），本文件的职责只有三件：

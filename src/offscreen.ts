@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // Offscreen 文档（MV3 扩展宿主）：**只做宿主接线**，识别/标点/翻译/采集的全部逻辑
 // 在 asr-engine.ts 里，与纯 Web 版共用同一份实现。
 //
@@ -13,8 +15,13 @@
 // 误判为"标签页已关闭"而整个清理掉（画面无字幕、麦克风灯灭，且没有任何提示）。
 // 所以：引擎建一次，sink 通过可变引用取"当前端口"。
 import { AsrEngine } from './asr-engine';
+import { HelperSource } from './helper';
+import { tSync } from './i18n';
 
 let port: chrome.runtime.Port;
+//: 会话代次：INIT/STOP 都会 +1。用来让"还在飞的 engine.init() 回调"作废 ——
+//: 用户可能在 init 期间就点了停止，那时再把 WS 接上只会留一条没人读的连接。
+let sessionGeneration = 0;
 
 const engine = new AsrEngine({
   resolveUrl: (p) => chrome.runtime.getURL(p),
@@ -80,9 +87,12 @@ function setupPort() {
   myPort.onMessage.addListener((msg: any) => {
     try {
       switch (msg?.type) {
-        case 'INIT_OFFSCREEN':
-          void engine.init({
-            source: msg.source === 'system' ? 'system' : msg.source === 'mic' ? 'mic' : 'tab',
+        case 'INIT_OFFSCREEN': {
+          const generation = ++sessionGeneration;
+          const initDone = engine.init({
+            source: msg.source === 'system' ? 'system'
+              : msg.source === 'mic' ? 'mic'
+              : msg.source === 'helper' ? 'helper' : 'tab',
             tabId: msg.tabId ?? null,
             lang: msg.lang,
             usePunct: msg.usePunct,
@@ -94,8 +104,24 @@ function setupPort() {
             translationDirection: msg.translationDirection,
             translationTiming: msg.translationTiming,
           });
+          // 桌面助手：PCM 由本机助手进程采集，经 WS 直接喂进引擎。
+          // 与 mic 的区别：不需要可见页（没有授权框）、不需要 bg 逐块转发（WS 就在本进程里）。
+          // **必须在 init 完成之后再接**：init 未完成时 Pipeline 还没进入 Running，
+          // feedAudio 会直接丢弃，表现为"按下开始后的头几个字没了"。Web 宿主就是这么做的。
+          if (msg.source === 'helper') {
+            void initDone
+              .then(() => {
+                // init 期间用户可能已经点了停止（或又开了一场）：代次变了就放弃，别接音频
+                if (generation !== sessionGeneration) return;
+                startHelperSource(msg.helperPort, msg.helperToken, msg.lang);
+              })
+              .catch(() => { /* init 失败内部只 log 不上抛；这里兜底避免未处理的拒绝 */ });
+          }
           break;
+        }
         case 'STOP_OFFSCREEN':
+          sessionGeneration += 1;          // 作废在飞的 init 回调
+          stopHelperSource();
           engine.stop();
           break;
         case 'SET_PUNCT':
@@ -156,3 +182,60 @@ function setupPort() {
 
 setupPort();
 console.log('[TM Offscreen] 文档已加载');
+
+// ---- 桌面助手音频源（本机助手 easysub-helper）----
+// 为什么放在 offscreen：这里就是引擎宿主，PCM 到手直接 feedMicChunk，不需要可见页、
+// 不需要 bg 逐块转发（对比 mic：那条链路必须由悬浮窗采、经 bg 中转，因为 Chrome 禁止
+// offscreen 调 getUserMedia）。WS 的地址与令牌由面板探测/配对后经 INIT 下发。
+let helperSource: HelperSource | null = null;
+// 错误文案用会话语言（offscreen 的 getLang 是异步的，这里的 lang 由 INIT 带下来）
+let helperLang = 'zh_CN';
+
+function toPanel(payload: any) {
+  try { port.postMessage({ type: 'FW_POP', payload }); } catch { /* 端口未就绪：丢弃 */ }
+}
+
+function stopHelperSource() {
+  if (helperSource) {
+    helperSource.stop();
+    helperSource = null;
+  }
+}
+
+function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
+  stopHelperSource();
+  helperLang = typeof langRaw === 'string' && langRaw ? langRaw : helperLang;
+  const port = Number(portRaw);
+  const token = String(tokenRaw || '');
+  if (!port || !token) {
+    // 缺令牌 = 没配对（可能压根没启动助手，也可能助手开着但没配过/处于暂停——
+    // 面板只在「探测到且未暂停」时才弹配对框）。这些全是常态：当静音音源处理，
+    // 不发 ERROR（那会把整场会话拆掉）。文案必须对三种成因都成立，别说"没在运行"
+    // ——用户明明开着助手窗口（独立审查抓的假文案）。
+    toPanel({ type: 'HELPER_SILENT', message: tSync(helperLang, 'helperSilentGeneric') });
+    return;
+  }
+  helperSource = new HelperSource({
+    port,
+    token,
+    source: 'system',
+    // 引擎会按 16k 直接消费；它内部自己算电平（recordLevel），所以这里不必再报 LEVEL
+    onPcm: (f32, rate) => engine.feedMicChunk(f32, rate),
+    onError: (message, code) => {
+      console.log('[TM Offscreen] 桌面助手错误:', code, message);
+      // 产品决定（2026-10-05）：助手没启动/处于暂停都是**常态**而不是故障——这个音源
+      // 本来就允许"没启动也能开始"（空音频=静音帧，识别照常）。所以这三类只降级成
+      // HELPER_SILENT（面板日志一句话），不再把整场会话当 ERROR 拆掉——此前一发 ERROR，
+      // background 会 cleanupAll 连模型一起拆，比"改前白拦一次"更糟（复审抓到的）。
+      // 'paused' 必须在清单里：助手窗口默认就是暂停，连接后对 start 必回 ERR_PAUSED，
+      // 这是最高频的一条；其余未知 code（真正故障）仍走 ERROR。
+      if (code === 'connect_failed' || code === 'ws_closed' || code === 'paused') {
+        toPanel({ type: 'HELPER_SILENT', message });
+        return;
+      }
+      toPanel({ type: 'ERROR', message });
+    },
+    log: (message) => engine.log(message),
+  });
+  helperSource.start();
+}

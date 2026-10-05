@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 import { t } from './i18n';
 // 字幕记录的读写全部收敛在 transcript-store（与纯 Web 版共用同一份实现）；
 // 这里只需要追加与挂译文两个入口，其余导出留给未来可能用到的地方。
@@ -21,7 +23,7 @@ let captureTabId: number | null = null;
 // 音频来源：'tab'=标签页捕获 | 'system'=系统音频（offscreen 内 getDisplayMedia 环回）
 // | 'mic'=麦克风。system/mic 模式无目标标签页，captureTabId 恒为 null，
 // "关标签页自动停止"/字幕层注入等 tab 逻辑全部天然跳过，字幕显示端为悬浮窗。
-let sessionSource: 'tab' | 'system' | 'mic' = 'tab';
+let sessionSource: 'tab' | 'system' | 'mic' | 'helper' = 'tab';
 // 麦克风采集的宿主是悬浮字幕窗（可见扩展页）：Chrome 不允许 offscreen 文档做
 // getUserMedia 音频采集（报 NotAllowedError，权限气泡也无从展示），而系统音频的
 // getDisplayMedia 选择器是特批例外——所以 mic 模式的音频轨只能在悬浮窗里拿。
@@ -206,7 +208,7 @@ chrome.runtime.onConnect.addListener((port) => {
       if (status !== 'Running') {
         try {
           const s = (await chrome.storage.session.get(SESSION_KEY))[SESSION_KEY] as
-            { source?: 'tab' | 'system' | 'mic'; status?: string } | undefined;
+            { source?: 'tab' | 'system' | 'mic' | 'helper'; status?: string } | undefined;
           if (s?.status === 'Running') { src = s.source || src; status = s.status; }
         } catch { /* 读不到快照就按内存态 */ }
       }
@@ -257,7 +259,12 @@ chrome.runtime.onConnect.addListener((port) => {
         if (bgLevels.length > LEVEL_SNAPSHOT_MAX) bgLevels.shift();
       }
       // 悬浮窗只消费这三类 FW_POP 消息（其余显示类已由 FW_CT 扇出覆盖，避免重复）
-      if (p.type === 'STATUS_CHANGED' || p.type === 'ERROR' || p.type === 'LEVEL') {
+      // HELPER_SILENT：桌面助手没启动/连接断开的**常态降级**（空音频=静音帧，识别照常）。
+      // 它不是故障：不惊动悬浮窗、不走 ERROR 的 cleanupAll（那会把模型整场拆掉），
+      // 只进面板日志区提醒一句"助手没连上，当前是静音"。
+      if (p.type === 'HELPER_SILENT') {
+        sendToPopup({ type: 'LOG', message: p.message });
+      } else if (p.type === 'STATUS_CHANGED' || p.type === 'ERROR' || p.type === 'LEVEL') {
         sendToFloating(p);
       }
       if (p.type === 'STATUS_CHANGED') {
@@ -268,9 +275,11 @@ chrome.runtime.onConnect.addListener((port) => {
         persistSession();
         // 附带 startedAt 让已打开的 popup 直接校准计时基准（重开面板不再从 00:00 起）
         sendToPopup({ ...p, startedAt: sessionStartedAt });
-      } else if (p.type !== 'SENTENCE_DONE') {
+      } else if (p.type !== 'SENTENCE_DONE' && p.type !== 'HELPER_SILENT') {
         // 坑：SENTENCE_DONE 不能走这里原样转发——下方盖章块会再发一份带 ts 的，
-        // 不排除的话 popup 每句收两条（一条无时标一条有），列表重复
+        // 不排除的话 popup 每句收两条（一条无时标一条有），列表重复。
+        // HELPER_SILENT 也排除：上面已按 LOG 转发过一次，原样再发会让面板打出
+        // 第二条、还带"错误："前缀——它不是故障（独立审查抓的）。
         sendToPopup(p);
       }
       if (p.type === 'ERROR') cleanupAll();
@@ -292,8 +301,9 @@ chrome.runtime.onConnect.addListener((port) => {
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         console.log('[TM BG] offscreen 重连, status=', msg.payload.status, 'tabId=', msg.payload.tabId);
         pipelineStatus = msg.payload.status;
-        const reviveSource: 'tab' | 'system' | 'mic' =
-          msg.payload.source === 'system' || msg.payload.source === 'mic' ? msg.payload.source : 'tab';
+        const reviveSource: 'tab' | 'system' | 'mic' | 'helper' =
+          msg.payload.source === 'system' || msg.payload.source === 'mic'
+            || msg.payload.source === 'helper' ? msg.payload.source : 'tab';
         sessionSource = reviveSource;
         if (msg.payload.status === 'Running' && reviveSource !== 'tab') {
           // system/mic 模式自愈：无标签页可校验，直接恢复会话状态（悬浮窗/popup 靠扇出消息刷新）
@@ -581,8 +591,8 @@ async function startRecognition(msg: any, respond: () => void) {
 
     pipelineStatus = 'Running';
     // 音频来源：system/mic 模式无目标标签页（captureTabId 恒 null），跳过字幕层注入等 tab 逻辑
-    const source: 'tab' | 'system' | 'mic' =
-      msg.source === 'system' || msg.source === 'mic' ? msg.source : 'tab';
+    const source: 'tab' | 'system' | 'mic' | 'helper' =
+      msg.source === 'system' || msg.source === 'mic' || msg.source === 'helper' ? msg.source : 'tab';
     sessionSource = source;
     captureTabId = source === 'tab' ? (msg.tabId || null) : null;
     sessionStartedAt = Date.now(); // START 成功即盖会话开始戳，计时基准唯一事实源
@@ -646,6 +656,12 @@ async function startRecognition(msg: any, respond: () => void) {
 
     // 配置在上面已读过（复用判定要用），这里只组装消息，不再重复读 storage
     const initMsg: any = { type: 'INIT_OFFSCREEN', tabId: msg.tabId, source, lang, usePunct };
+    // 桌面助手音源：面板探测/配对后拿到 {port, token}，随 START 一起上来，这里转交 offscreen
+    // （offscreen 没有 storage 访问权，也无法自己探测——探测/配对全在面板（可见页）完成）。
+    if (source === 'helper') {
+      initMsg.helperPort = msg.helperPort;
+      initMsg.helperToken = msg.helperToken;
+    }
     if (prefs.endpointRule1) initMsg.endpointRule1 = prefs.endpointRule1;
     if (prefs.endpointRule2) initMsg.endpointRule2 = prefs.endpointRule2;
     if (prefs.endpointRule3) initMsg.endpointRule3 = prefs.endpointRule3;

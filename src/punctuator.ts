@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 const CJK = /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]/
 const LATIN = /[a-zA-Z]/
 

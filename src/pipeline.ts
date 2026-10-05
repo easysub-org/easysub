@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 export enum JobStatus { Stopped, Running }
 
 export interface PipelineEvents {

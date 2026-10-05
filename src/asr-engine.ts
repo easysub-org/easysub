@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 识别引擎（宿主无关）：把 WASM 识别、标点恢复、离线翻译、音频采集、延迟/电平测量
 // 全部收敛到这一个类里，**不依赖任何 chrome.* API**。
 //
@@ -35,7 +37,9 @@ export const ASR_DB_KEY = '__asr_wasm_data';
 // 模型缺失时的错误标记：宿主据此弹"导入模型"引导而不是报一句看不懂的加载失败
 export const ERR_MODEL_MISSING = 'MODEL_MISSING';
 
-export type EngineSource = 'tab' | 'system' | 'mic';
+// 'helper' = 本机助手（easysub-helper）：PCM 由桌面进程采集后经 ws://127.0.0.1 送入，
+// 走 feedMicChunk 同一条注入通道（无 MediaStream、无选择器、无授权框）。见 src/helper.ts。
+export type EngineSource = 'tab' | 'system' | 'mic' | 'helper';
 
 // 出站消息出口。两条通道与扩展既有协议同名：display=字幕显示端（页内叠层/悬浮窗），
 // panel=控制面板。Web 宿主里两者通常指向同一个页面上的不同区域。
@@ -229,7 +233,9 @@ export class AsrEngine {
     // 扩展的 background 目前不在 INIT 里带 streamId（tab 流由 STREAM_READY 后补），
     // 但保持与旧实现同构：带上就记下来，重连上报时一并还原，免得日后 bg 补发该字段时静默失效。
     this.reconnectStreamId = (msg as any).streamId || null;
-    this.reconnectSource = msg.source === 'system' ? 'system' : msg.source === 'mic' ? 'mic' : 'tab';
+    this.reconnectSource = msg.source === 'system' ? 'system'
+      : msg.source === 'mic' ? 'mic'
+      : msg.source === 'helper' ? 'helper' : 'tab';
     if (msg.lang) this.currentLang = msg.lang;
     this.usePunct = msg.usePunct !== false;
 

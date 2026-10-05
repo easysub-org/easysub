@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 跨宿主平台层：把"MV3 扩展"与"普通网页"两种运行环境的差异收在这一处，
 // 让 panel / i18n / overlay / model-db 这类共享模块不必各自写 if (chrome) 分支。
 //

@@ -1,0 +1,220 @@
+name: cla
+
+# CLA 检查（对齐主流做法 + 自查修补）
+#
+# 主流做法参考：
+#   * 签署语句用 CLA Assistant 的默认句 "I have read the CLA Document and I hereby sign the CLA"
+#     （cla-assistant / cla-assistant-action 的默认值），换工具也能直接复用；
+#   * **签名落库**：CLA Assistant 用 `path-to-signatures`（仓库里的 JSON）存签名，并建议合并后锁 PR，
+#     理由正是"贡献者事后可以删改自己的签署评论"。本工作流把签名写进 signatures/cla.json，
+#     评论只当来源凭证 → 删评论不影响记录。
+#   * 未签时让检查**失败**，这样可以在分支保护里把 `CLA` 设为必需状态检查（真正卡住合并）。
+#
+# 安全说明（重要）：为了能给 fork 来的 PR 打标签/发评论/写签名库，用 pull_request_target 拿写权限，
+# 因此本工作流**绝不 checkout、绝不执行 PR 里的任何代码**，只用 GitHub API 读写 PR 元信息、评论与签名库。
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+  issue_comment:
+    types: [created]
+  # 手动重跑：Actions → cla → Run workflow → 填 PR 号。
+  # 用途：改完 CLA 正文想复测、或某次运行失败后不想再 push 一次。
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'PR number to re-check'
+        required: true
+        type: string
+
+permissions:
+  contents: write        # 写 signatures/cla.json
+  pull-requests: write   # 打标签 / 发评论
+  issues: write
+
+# 签名库是**全仓共享**的一个文件，必须串行写入，否则两个 PR 同时签会互相覆盖
+concurrency:
+  group: cla-signatures
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: CLA
+    runs-on: ubuntu-latest
+    # issue_comment 也会在普通 issue 上触发，这里只处理 PR
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || github.event_name == 'pull_request_target'
+      || github.event.issue.pull_request != null
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            // ===== 常量 =====
+            // 与 CLA.md 第 7 条完全一致；比对时归一化空白与大小写
+            const PHRASE = 'i have read the cla document and i hereby sign the cla';
+            // 改动 CLA 正文时必须同时改这里：签名记录里带版本，便于日后判断要不要重签
+            const DOC_VERSION = '1.1';
+            const DOC_PATH = 'CLA.md';
+            const SIG_PATH = 'signatures/cla.json';
+            const SIGNED = 'cla-signed';
+            const PENDING = 'cla-pending';
+            const REMINDER_MARK = '<!-- cla-bot:reminder -->';
+            const CONFIRM_MARK = '<!-- cla-bot:confirmed -->';
+            // 维护者与机器人不需要签（换人维护时把新 ID 加进来）。
+            // 统一小写比较：GitHub 登录名不区分大小写，但 API 返回的是账号建立时的写法。
+            const BYPASS = new Set(['huchangzhi', 'dependabot[bot]', 'github-actions[bot]']);
+            const isMe = (login) => BYPASS.has(String(login || '').toLowerCase());
+
+            const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, ' ');
+            const { owner, repo } = context.repo;
+            const defaultBranch = context.payload.repository.default_branch;
+            // pull_request_target → payload.pull_request；issue_comment → context.issue；
+            // workflow_dispatch → 手动填的 pr 输入
+            const number = Number(context.payload.inputs?.pr)
+              || context.payload.pull_request?.number
+              || context.issue?.number;
+            const docUrl = `https://github.com/${owner}/${repo}/blob/${defaultBranch}/${DOC_PATH}`;
+
+            // 贡献者自报的名字只用于留档，必须清洗：去掉换行/控制字符与 @、反引号、markdown 记号，
+            // 并限制长度——否则会被原样塞进评论与 JSON（注入风险）。
+            function cleanName(raw) {
+              const one = String(raw || '')
+                .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+                .replace(/[`*_<>\[\]()@#|]/g, ' ')
+                .replace(/\s+/g, ' ')
+                .trim();
+              return one.slice(0, 80);
+            }
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+            const author = pr.user.login;
+
+            async function ensureLabel(name, color, description) {
+              try {
+                await github.rest.issues.getLabel({ owner, repo, name });
+              } catch (e) {
+                await github.rest.issues.createLabel({ owner, repo, name, color, description });
+              }
+            }
+            const removeLabel = async (name) => {
+              try { await github.rest.issues.removeLabel({ owner, repo, issue_number: number, name }); }
+              catch (e) { /* 本来就没有 */ }
+            };
+            const markSigned = async () => {
+              if (!pr.labels.some((l) => l.name === SIGNED)) {
+                await ensureLabel(SIGNED, '0e8a16', 'CLA 已签署');
+                await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: [SIGNED] });
+              }
+              await removeLabel(PENDING);
+            };
+
+            if (isMe(author)) {
+              core.info(`${author} 在免签名单里，跳过`);
+              return;
+            }
+            if (pr.state !== 'open') {
+              core.info(`PR #${number} 状态为 ${pr.state}，跳过`);
+              return;
+            }
+
+            // ===== 读签名库 =====
+            async function loadSignatures() {
+              try {
+                const res = await github.rest.repos.getContent({
+                  owner, repo, path: SIG_PATH, ref: defaultBranch,
+                });
+                const text = Buffer.from(res.data.content, 'base64').toString('utf8');
+                return { sha: res.data.sha, data: JSON.parse(text) };
+              } catch (e) {
+                core.info(`${SIG_PATH} 尚不存在或不可读（${e.status || e.message}），按空库处理`);
+                return { sha: null, data: { version: 1, documentVersion: DOC_VERSION, signed: [] } };
+              }
+            }
+            async function saveSignatures(sha, data) {
+              const body = {
+                owner, repo, path: SIG_PATH, branch: defaultBranch,
+                message: `chore(cla): record signature for @${author}`,
+                content: Buffer.from(JSON.stringify(data, null, 2) + '\n', 'utf8').toString('base64'),
+              };
+              if (sha) body.sha = sha;
+              await github.rest.repos.createOrUpdateFileContents(body);
+            }
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments, { owner, repo, issue_number: number, per_page: 100 });
+            const confirmOnce = async (name) => {
+              const already = comments.some(
+                (c) => c.user.login === 'github-actions[bot]' && (c.body || '').includes(CONFIRM_MARK));
+              if (already) return;
+              const who = name ? `${author}（${name}）` : author;
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number,
+                body: `${CONFIRM_MARK}\n✅ 收到，CLA 已签署：**${who}**，记录在 \`${SIG_PATH}\`。谢谢！\n\n` +
+                      `Thanks — your CLA signature is recorded in \`${SIG_PATH}\` (one signature covers all ` +
+                      `your future contributions).`,
+              });
+            };
+
+            const { sha, data } = await loadSignatures();
+            const store = Array.isArray(data.signed) ? data.signed : [];
+
+            // 1) 库里已有（同一个 PR 的后续 push，或别的 PR 里已经签过）
+            if (store.some((s) => String(s.username || '').toLowerCase() === author.toLowerCase()
+                           && s.documentVersion === DOC_VERSION)) {
+              await markSigned();
+              core.info(`${author} 已在签名库中`);
+              return;
+            }
+
+            // 2) 扫描本 PR 里**作者自己**发的签署评论
+            const signedComment = comments.find(
+              (c) => c.user.login.toLowerCase() === author.toLowerCase() && norm(c.body).includes(PHRASE));
+            if (signedComment) {
+              const body = signedComment.body || '';
+              // 支持 "Name: 张三" / "姓名：张三"（可选）
+              const m = body.match(/(?:^|\n)\s*(?:name|姓名|法定姓名)\s*[:：]\s*(.+)/i);
+              const name = cleanName(m ? m[1] : '');
+              const record = {
+                username: author,
+                usernameLower: author.toLowerCase(),
+                name: name || null,
+                signedAt: signedComment.created_at,
+                pullRequest: number,
+                comment: signedComment.html_url,
+                document: DOC_PATH,
+                documentVersion: DOC_VERSION,
+              };
+              // 串行组内理论上不会冲突，但别处（手动编辑、另一分支合并）可能改过 → 失败就重读再试一次
+              try {
+                await saveSignatures(sha, Object.assign({}, data, { signed: store.concat([record]) }));
+              } catch (e) {
+                core.warning(`写入签名库失败，重读后重试一次：${e.message}`);
+                const again = await loadSignatures();
+                await saveSignatures(again.sha, Object.assign({}, again.data,
+                  { signed: (again.data.signed || []).concat([record]) }));
+              }
+              await markSigned();
+              await confirmOnce(name);
+              core.info(`已记录 ${author} 的 CLA 签名（${DOC_VERSION}）`);
+              return;
+            }
+
+            // 3) 没签：挂标记 + 提醒一次 + 让检查失败（配合分支保护即可卡住合并）
+            if (!pr.labels.some((l) => l.name === PENDING)) {
+              await ensureLabel(PENDING, 'd93f0b', '等待签署 CLA');
+              await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: [PENDING] });
+            }
+            const reminded = comments.some(
+              (c) => c.user.login === 'github-actions[bot]' && (c.body || '').includes(REMINDER_MARK));
+            if (!reminded) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: number,
+                body: `${REMINDER_MARK}\n@${author} 合并前需要先签一下 CLA（你**保留**自己贡献的版权）。\n\n` +
+                      `在你的 PR 里发一条评论，内容照抄：\n\n` +
+                      `> I have read the CLA Document and I hereby sign the CLA.\n\n` +
+                      `建议下一行写上你的法定姓名（便于留档）：\`Name: 你的姓名\`\n\n` +
+                      `协议全文见 [CLA.md](${docUrl})，说明见 [CONTRIBUTING.md]` +
+                      `(https://github.com/${owner}/${repo}/blob/${defaultBranch}/CONTRIBUTING.md)。`,
+              });
+            }
+            core.setFailed(`CLA 未签署：@${author} 需要在 PR 里签署后才能合并`);

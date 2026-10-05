@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 纯 Web 版字幕浮窗宿主。
 //
 // 与扩展的悬浮字幕窗（floating.ts）共用同一份浮窗外壳 SubtitleShell + overlay.ts，

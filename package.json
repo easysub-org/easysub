@@ -2,6 +2,13 @@
   "name": "easysub",
   "version": "1.0.0",
   "description": "免费、安全的基于本地模型的实时字幕浏览器扩展",
+  "license": "AGPL-3.0-or-later",
+  "author": "hcz1017",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/easysub-org/easysub.git"
+  },
+  "homepage": "https://github.com/easysub-org/easysub",
   "scripts": {
     "download-wasm": "pwsh -ExecutionPolicy Bypass -File scripts/download-wasm.ps1",
     "download-wasm:sh": "bash scripts/download-wasm.sh",

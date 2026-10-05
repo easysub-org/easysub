@@ -17,4 +17,8 @@ models
 TMSpeech-wasm-builder/
 easysub-wasm-builder/
 .agent-teams/
+.workbuddy/
 test_model/
+
+# 本机助手（Python，开发期原地进行，长期独立成库）
+easysub-helper/

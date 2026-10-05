@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 import { Overlay } from './overlay';
 console.log('[TM Content] loaded');
 // 坑：background 可能在同一页面重复注入本脚本（启动重试、导航重注入竞态）。

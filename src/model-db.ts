@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 翻译模型文件的本地存储：用户用 <input type=file> 选目录读入的文件统一落 IndexedDB，
 // popup 写入、offscreen 翻译 worker 读取，扩展各上下文同源共享，无需任何权限。
 const DB_NAME = 'tmspeech';

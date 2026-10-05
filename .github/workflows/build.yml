@@ -39,15 +39,38 @@ jobs:
           rm -f public/wasm/index.html public/wasm/app-asr.js
           ls -lh public/wasm/
 
+      - name: 校验版本号合法
+        run: node scripts/bump-version.mjs --check
+
       - name: Set release version
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
         run: |
           V=${{ github.event.inputs.version }}
+          # manifest.json 的 version 必须是"1~4 段整数"（浏览器硬约束）；脚本负责
+          # 把发行写法翻译过去，并把原始写法写进 version_name：
+          #   x.x.x        → manifest.version = x.x.x
+          #   x.x.xbeta.x  → manifest.version = x.x.x.x、version_name = x.x.xbeta.x
+          # 非法写法（1.8.0-beta.1 / 1.8beta / 1.8.0.1 …）在这里直接失败，不产出一个装不上的包。
+          node scripts/bump-version.mjs "$V"
+          # 面板/标题仍显示**原始写法**（用户要求：插件面板那个版本号保持原样）
           sed -i "s/开发版本/v$V/g" src/ui-body.html src/i18n.ts
-          sed -i "s/\"version\": \".*\"/\"version\": \"$V\"/" package.json
-          sed -i "s/\"version\": \".*\"/\"version\": \"$V\"/" manifest.json
 
       - run: npm run build
+
+      - name: 校验产物里的版本号（manifest=浏览器写法，面板=原始写法）
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+        run: |
+          V='${{ github.event.inputs.version }}'
+          node -e '
+            const m = require("./dist/manifest.json");
+            if (!/^\d+(\.\d+){0,3}$/.test(m.version)) {
+              console.error("::error::dist/manifest.json 的 version 非法：" + m.version); process.exit(1);
+            }
+            console.log("dist/manifest.json version =", m.version,
+                        "version_name =", m.version_name || "(无)");
+          '
+          # 面板显示必须是原始写法（例如 v1.8.0beta.1），不能被换成 1.8.0.1
+          grep -rq "v$V" dist/*.js || { echo "::error::面板里没有原始版本号 v$V（是不是被换成了浏览器写法？）"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
@@ -91,8 +114,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
         run: |
           V=${{ github.event.inputs.version }}
+          node scripts/bump-version.mjs "$V"          # 校验 + 写 package.json（manifest 由扩展那份负责）
           sed -i "s/开发版本/v$V/g" src/ui-body.html src/i18n.ts
-          sed -i "s/\"version\": \".*\"/\"version\": \"$V\"/" package.json
 
       - run: npm run build:web
 
@@ -143,9 +166,8 @@ jobs:
       - name: Set release version
         run: |
           V=${{ github.event.inputs.version }}
+          node scripts/bump-version.mjs "$V"
           sed -i "s/开发版本/v$V/g" src/ui-body.html src/i18n.ts
-          sed -i "s/\"version\": \".*\"/\"version\": \"$V\"/" package.json
-          sed -i "s/\"version\": \".*\"/\"version\": \"$V\"/" manifest.json
 
       - run: npm run build
 

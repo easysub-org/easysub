@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 hcz1017
 // 字幕浮窗外壳（扩展悬浮窗 + 纯 Web 版字幕浮窗共用）。
 //
 // 两个宿主只有三点不同，其余（叠层、工具条、字号、画中画置顶、消息分发）完全一样：
