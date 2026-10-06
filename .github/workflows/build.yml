@@ -55,6 +55,11 @@ jobs:
           # 面板/标题仍显示**原始写法**（用户要求：插件面板那个版本号保持原样）
           sed -i "s/开发版本/v$V/g" src/ui-body.html src/i18n.ts
 
+      # 门卫等纯逻辑的回归测试（node --test 直跑 TS）。六轮审查里"能不能开始"这条规则
+      # 翻转过一次，全靠人工回归——别再让它在没有测试兜底的情况下被改回去。
+      - name: 单元测试（node --test）
+        run: npm test
+
       - run: npm run build
 
       - name: 校验产物里的版本号（manifest=浏览器写法，面板=原始写法）

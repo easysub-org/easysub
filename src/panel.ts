@@ -23,6 +23,7 @@ import {
   HelperInfo, HelperSession, helperErrorMessage, loadHelperSession, pairHelper, probeHelper, saveHelperSession,
   HELPER_RELEASES_URL,
 } from './helper';
+import { evaluateHelperGate } from './helper-gate';
 
 const $ = (id: string) => document.getElementById(id)!;
 // 可选元素（Web 版外壳独有）：扩展 popup 模板里没有这些 id，取值一律走这里，
@@ -221,7 +222,12 @@ async function submitHelperPair() {
   const port = helperInfo?.port;
   const code = (helperPairCodeEl?.value || '').trim();
   if (!port) { showHelperPairError(tSync(currentLang, 'helperNotFound')); return; }
-  if (!code) return;
+  if (!code) {
+    // 坑（全盲审查指出）：空码以前是静默 return——按钮像坏了。给一行错误 + 把焦点放回输入框。
+    showHelperPairError(tSync(currentLang, 'helperPairEmptyCode'));
+    helperPairCodeEl?.focus();
+    return;
+  }
   if (helperPairErrEl) helperPairErrEl.hidden = true;
   const res = await pairHelper(port, code);
   if (!res.ok) {
@@ -1300,27 +1306,26 @@ async function doStart(): Promise<void> {
     // 回来再点「开始」，仍然读到旧的 paused=true。Web 版页面常驻，必然复现。
     await detectHelper(true);
     // 产品决定（2026-10-05，**用户澄清后修正**）：能不能开始，看的是"**有没有连上助手**"，
-    // 不是"有没有声音"：
-    //   * 助手没运行 / 没安装 / 探测不到 → **不启动**（弹说明框 + 下载链接）。这条音源完全
-    //     依赖助手进程，没连上就点开始只会得到一场纯静音会话 —— 用户实测反馈的原话就是
-    //     "助手软件都没打开、根本没连接，点开始还能给我启动？"。
-    //   * 助手在跑、已配对、但处于**暂停** → **允许启动**：那是"连着但没在采音频"，
-    //     页面收静音帧、识别照常（等用户在助手窗口点「启动」就直接出声，无需重开）。
-    //   * 助手在跑但**没配对** → 弹配对框（没有令牌连不上）。
-    if (!helperInfo) {
+    // 不是"有没有声音"。裁决抽成了纯函数 `evaluateHelperGate`（src/helper-gate.ts），
+    // 规则原文与回归测试都在那里 —— 改门卫先改它、再跑 `npm test`。
+    const action = evaluateHelperGate(helperInfo, !!helperSession);
+    if (action === 'offline') {
+      // 助手没运行 / 没安装 / 探测不到：不启动，弹说明框 + 下载链接。这条音源完全依赖
+      // 助手进程，没连上就点开始只会得到一场纯静音会话 —— 用户实测反馈的原话就是
+      // "助手软件都没打开、根本没连接，点开始还能给我启动？"。
       showHelperOfflineModal();
       setStatus('Stopped');
       log(tSync(currentLang, 'helperOfflineLog'));
       return;
     }
-    if (!helperSession) {
-      // 检测到了但未配对：弹配对框；配对成功后由 continuation 重走 doStart
+    if (action === 'pair') {
+      // 连得上但没配对：弹配对框（没有令牌连不上）；配对成功后由 continuation 重走 doStart。
       helperContinuation = () => { void doStart(); };
       showHelperPairModal();
       setStatus('Stopped');
       return;
     }
-    hideHelperOfflineModal();
+    hideHelperOfflineModal();   // start：连得上且已配对（暂停与否都不拦，静音降级在后面兜着）
   }
   // 系统音频：先把"浏览器不能单独授权音频、画面流授权后立刻销毁、记得勾上分享音频"
   // 三件事讲清楚，用户点确认后才进入下面的取流链路。

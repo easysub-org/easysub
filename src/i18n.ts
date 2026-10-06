@@ -232,9 +232,11 @@ const strings: Record<string, Record<string, string>> = {
     helperPairErrExpired: '配对码已过期，请在助手窗口点「换一个」重新生成',
     helperPairErrLocked: '失败次数过多已被临时锁定，请稍后再试',
     helperPairErrNoCode: '助手当前没有有效配对码，请在助手窗口里查看',
+    // 配对框里没填码就点「配对并开始」（以前是静默 return，按钮像坏了——全盲审查指出）
+    helperPairEmptyCode: '请先填入助手窗口里显示的 6 位配对码',
     helperPairErrGeneric: '配对失败：{m}',
-    helperPairErrNetwork: '连不上桌面助手，请确认它已启动（助手窗口里应显示「正在监听」）',
-    helperNotFound: '没探测到桌面助手，无法配对。请先在助手里点「启动」（窗口里应显示「正在监听」）；助手还没安装的话，可从音源介绍区的链接下载。注意：会话中途才启动的话，需停止后重新点「开始」才会连上。',
+    helperPairErrNetwork: '连不上桌面助手：请确认助手窗口已打开（窗口底部日志里有「正在监听」字样）。注意：助手处于「暂停」也可以配对，不必先点「启动」。',
+    helperNotFound: '没探测到桌面助手，无法配对。请确认助手窗口已打开（窗口底部日志里有「正在监听」字样），再重新提交；如果还没安装助手，先关掉这个窗口、按「本机助手没在运行」提示里的链接下载并启动。',
     // 助手窗口的「启动/暂停」总开关默认是暂停：这不是故障，是等用户去按一下。
     // 点「启动」后 server 会直接向已连客户端广播真实 PCM（无需重试、无需重新点开始）
     helperPaused: '桌面助手窗口处于「暂停」：点窗口里的「启动」即可开始出声（无需其它操作；此前识别到的内容不受影响）',
@@ -246,7 +248,7 @@ const strings: Record<string, Record<string, string>> = {
     helperSilentGeneric: '尚未连接到桌面助手（没启动，或还没配对）：桌面助手音源此刻是静音，识别照常进行。要采整机声音，请启动助手，再在面板里点「开始」——会弹出配对框，把助手窗口里的 6 位码填进去即可；若本场识别已经在跑，需先停止、再重新点「开始」才会弹框。',
     // —— 助手没连上就不许开始（用户原话：软件都没打开、根本没连接，点开始还能给启动？）——
     helperOfflineTitle: '本机助手没在运行',
-    helperOfflineBody: '「桌面助手」这条音源要靠本机运行的助手软件采集音频：没连上它就没有音频可识别，所以这次没有开始。请先打开助手（它的窗口里应显示「正在监听」），再回到这里点「开始」。',
+    helperOfflineBody: '「桌面助手」这条音源要靠本机运行的助手软件采集音频：没连上它就没有音频可识别，所以这次没有开始。请先打开助手（窗口底部日志里有「正在监听」字样），再回到这里点「开始」。',
     helperOfflineLog: '桌面助手没在运行（未探测到）：本次没有开始 —— 请先启动助手，再点「开始」',
     helperOfflineOk: '知道了',
     helperCorsOriginHint: '另外：本页地址（{origin}）不在本机，助手默认只放行回环地址上的页面与浏览器扩展，所以探测被浏览器拦掉了。请改用 http://127.0.0.1 打开本页，或让助手以 --allow-cors-all 启动（等价于 --allow-origin {origin}）。',
@@ -506,9 +508,10 @@ const strings: Record<string, Record<string, string>> = {
     helperPairErrExpired: 'The pair code expired — click "New code" in the helper window to get a new one',
     helperPairErrLocked: 'Too many failed attempts; temporarily locked, try again later',
     helperPairErrNoCode: 'The helper has no valid pair code right now — check the helper window',
+    helperPairEmptyCode: 'Enter the 6-character pair code shown in the helper window first',
     helperPairErrGeneric: 'Pairing failed: {m}',
-    helperPairErrNetwork: 'Cannot reach the desktop helper — make sure it is running (its window should say "listening")',
-    helperNotFound: 'No desktop helper was detected, so pairing is not possible. Press "Start" in the helper first (its window should say "listening"); if the helper is not installed yet, download it via the link in the audio source description. Note: if you start it in the middle of a session, stop and press Start again to connect.',
+    helperPairErrNetwork: 'Cannot reach the desktop helper — make sure its window is open (the bottom log says "listening"). Note: the helper may be paused, you can still pair without pressing Start.',
+    helperNotFound: 'No desktop helper was detected, so pairing is not possible. Make sure its window is open (the bottom log says "listening"), then submit the code again; if the helper is not installed yet, close this box and follow the "helper is not running" dialog, which links the download.',
     helperPaused: 'The desktop helper window is paused — press "Start" in its window to begin hearing audio (nothing else needed; what has been transcribed so far is unaffected)',
     helperWsClosed: 'Disconnected from the desktop helper — first check that its window is still running, then stop this session and press Start again to reconnect',
     helperNeverConnected: 'Could not connect to the desktop helper: this session was stopped (so you are not left looking at a session that is silently doing nothing). Make sure the helper is running and this browser is paired, then press Start again.',
@@ -516,7 +519,7 @@ const strings: Record<string, Record<string, string>> = {
     helperSilentGeneric: 'Not connected to the desktop helper (it is not running, or this browser is not paired yet): this source is silent right now and transcription keeps working. To capture whole-machine sound, start the helper, then press Start in the panel — a pairing box appears, where you enter the 6-character code shown in the helper window; if a session is already running, stop it and press Start again to get that box.',
     // — the helper must be connected before a session may start (user's own words) —
     helperOfflineTitle: 'The desktop helper is not running',
-    helperOfflineBody: 'The "desktop helper" source captures audio through a helper app running on this machine: with no connection there is nothing to transcribe, so this start was not performed. Open the helper first (its window should say "listening"), then come back and press Start.',
+    helperOfflineBody: 'The "desktop helper" source captures audio through a helper app running on this machine: with no connection there is nothing to transcribe, so this start was not performed. Open the helper first (the bottom log of its window says "listening"), then come back and press Start.',
     helperOfflineLog: 'Desktop helper is not running (not detected): start cancelled — open the helper first, then press Start',
     helperOfflineOk: 'Got it',
     helperCorsOriginHint: 'Note: this page is served from {origin}, which is not a loopback address — the helper only allows loopback pages and browser extensions by default, so the browser blocked the probe. Open this page via http://127.0.0.1, or start the helper with --allow-cors-all (equivalent to --allow-origin {origin}).',
