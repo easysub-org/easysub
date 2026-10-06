@@ -17,9 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 坑：必须 ≥22.18——单元测试 `node --test "tests/*.test.mjs"` 需要 21+ 的 glob 展开、
+      # 直跑 .ts 需要 22.18+ 的类型剥离（20.x 两者都没有，npm test 必挂，第七轮审查实测）。
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - run: npm ci
 
@@ -95,9 +97,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 坑：必须 ≥22.18——单元测试 `node --test "tests/*.test.mjs"` 需要 21+ 的 glob 展开、
+      # 直跑 .ts 需要 22.18+ 的类型剥离（20.x 两者都没有，npm test 必挂，第七轮审查实测）。
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - run: npm ci
 
@@ -121,6 +125,10 @@ jobs:
           V=${{ github.event.inputs.version }}
           node scripts/bump-version.mjs "$V"          # 校验 + 写 package.json（manifest 由扩展那份负责）
           sed -i "s/开发版本/v$V/g" src/ui-body.html src/i18n.ts
+
+      # 每个构建作业都跑一遍门卫测试：门卫规则曾在六轮审查里翻转，多一道兜底不嫌多
+      - name: 单元测试（node --test）
+        run: npm test
 
       - run: npm run build:web
 
@@ -149,9 +157,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # 坑：必须 ≥22.18——单元测试 `node --test "tests/*.test.mjs"` 需要 21+ 的 glob 展开、
+      # 直跑 .ts 需要 22.18+ 的类型剥离（20.x 两者都没有，npm test 必挂，第七轮审查实测）。
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - run: npm ci
 
@@ -173,6 +183,10 @@ jobs:
           V=${{ github.event.inputs.version }}
           node scripts/bump-version.mjs "$V"
           sed -i "s/开发版本/v$V/g" src/ui-body.html src/i18n.ts
+
+      # 每个构建作业都跑一遍门卫测试：门卫规则曾在六轮审查里翻转，多一道兜底不嫌多
+      - name: 单元测试（node --test）
+        run: npm test
 
       - run: npm run build
 

@@ -20,10 +20,8 @@ test('探测到但未配对 → pair（弹配对框）', () => {
 });
 
 test('已配对 + 助手处于暂停 → start（用户明确要求的例外：开关控制音频，不控制连接）', () => {
-  assert.equal(evaluateHelperGate(probe(true), true), 'start');
-});
-
-test('已配对 + 助手正在采 → start', () => {
+  // 注意：门卫只看"探测到 + 有会话"，paused 不参与裁决 —— 暂停与否都放行，
+  // 暂停期间页面收静音帧，用户在助手窗口点「启动」后 server 直接续推真实 PCM。
   assert.equal(evaluateHelperGate(probe(true), true), 'start');
 });
 

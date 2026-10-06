@@ -1412,6 +1412,9 @@ async function doStart(): Promise<void> {
   if (source !== pendingSource) {
     releasePreStream();
     setStatus('Stopped');
+    // 与同级中止路径（system 不支持/模型失败等）一致：清掉"已确认过选择器说明"的标志，
+    // 否则用户切回 system 再点开始会跳过说明框直接弹选择器。
+    pickConfirmPassed = false;
     return;
   }
   // 坑：不支持平台选了 system 时【必须明确拦下并说明】，不能静默降级成 tab——
