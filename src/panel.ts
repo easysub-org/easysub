@@ -1400,6 +1400,15 @@ async function doStart(): Promise<void> {
     return;
   }
   const source: AudioSourceId = readSelectedSource();
+  // 坑（独立审查指出的极窄窗口）：门卫用的是**点击时**的 pendingSource，而这里重新读了一次
+  // 选择器 —— 用户在门卫探测的亚秒级窗口内把下拉切走，就会发出一条**门卫没检过**的
+  // helper START（有旧令牌时甚至能连上）。音源变了就中止本次启动，让用户带着新选择
+  // 重新点「开始」——门卫会按新音源重跑。
+  if (source !== pendingSource) {
+    releasePreStream();
+    setStatus('Stopped');
+    return;
+  }
   // 坑：不支持平台选了 system 时【必须明确拦下并说明】，不能静默降级成 tab——
   // 降级会让用户以为系统音频能用、只是没声音，排查方向完全错。
   if (source === 'system' && !SYSTEM_AUDIO_SUPPORTED) {

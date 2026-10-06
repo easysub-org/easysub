@@ -524,10 +524,9 @@
 
   <!-- 桌面助手配对·模态（两端共用）：助手会把本机音频交给任何连上来的页面，所以首次必须用
        配对码换取设备令牌（配对码只显示在用户自己启动的助手窗口里，= 用户在场的证明）。
-       音源本身是常驻显示的；弹出条件：选了助手音源 + 探测到了助手（/api/pair/info 明确答
-       app=easysub-helper）+ 本浏览器还没有令牌，且**没有点过「取消」**（点过之后本次会话
-       不再打扰；会话一结束就恢复——见 panel.ts 的 helperPairSkipped）。
-       点「取消」= 这次先不配对、照样静音开始。 -->
+       音源本身是常驻显示的；弹出条件：选了助手音源 + 探测到了助手 + 本浏览器还没有令牌。
+       点「取消」= **放弃这次启动**（没有令牌就连不上助手，而"没连上就不许开始"——
+       不会出现"先不配对、照样静音开始"）。会话一结束，下次开始会重新弹框。 -->
   <div class="unsup-mask" id="helperPairModal" hidden>
     <div class="unsup-card" role="dialog" aria-modal="true" aria-labelledby="helperPairTitleEl">
       <div class="unsup-head">
