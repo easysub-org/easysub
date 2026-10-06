@@ -61,8 +61,9 @@
         <option value="mic" id="optSourceMic">麦克风</option>
         <!-- 桌面助手音源：**常驻显示**（探测不到也看得见）。介绍固定一句话、不随状态变化。
              启动规则（用户澄清后的原意）：**没连上助手就不许开始**（助手没运行/没安装/没配对
-             → 停在停止态并弹说明或配对框）；助手在跑、已配对、只是处于「暂停」→ 允许开始
-             （静音帧，识别照常）。判断的是"有没有连上"，不是"有没有声音" —— 见 panel.ts 的 doStart。 -->
+             → 停在停止态并弹说明或配对框）；探测到且已配对 → 放行，**不管助手是不是处于
+             「暂停」**（暂停时页面收静音帧、识别照常，用户在助手窗口点「启动」就直接出声）。
+             判断的是"有没有连上"，不是"有没有声音" —— 规则原文与测试见 src/helper-gate.ts。 -->
         <option value="helper" id="optSourceHelper">桌面助手</option>
       </select>
       <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
