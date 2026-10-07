@@ -7,12 +7,18 @@
 // tabCapture 是 Chrome 独有。桌面助手用 OS 原生 API 采集（WASAPI loopback / PulseAudio
 // monitor / macOS Core Audio tap），再把定长 20ms PCM 帧经 ws://127.0.0.1 推过来。
 //
-// 交互纪律（产品决定，2026-10-05 修正）：
+// 交互纪律（产品决定。**2026-10-05 用户澄清后修正过一次，别再按旧说法改回去**）：
 //   ① **音源常驻显示**，介绍固定一句常态文案，不随启动/配对状态切换（早期"探测到才显示"已废弃：
 //      用户实测在 Web 版里因此找不到这个音源，连怎么配对都无从下手）；
-//   ② **没启动/没配对/暂停都不拦启动**：这些状态下该音源就是空音频（静音帧），识别照常进行；
-//      只有「探测到了但未配对」才在点开始时弹配对框 —— 助手会把本机音频交给任何连上来的页面，
-//      所以首次必须用配对码换取设备令牌（配对码只显示在用户自己启动的助手窗口里 = 用户在场的证明）；
+//   ② **没连上就不许开始**：能不能开始只看"有没有连上助手"，不看"有没有声音"——
+//      · 助手没运行/没安装/探测不到 → 面板**拦住不启动**，弹说明框 + 下载链接；
+//      · 探测到但**还没配对** → 弹配对框（首次要用配对码换设备令牌，配对码只显示在用户自己
+//        启动的助手窗口里 = 用户在场的证明）；点「取消」= 放弃这次启动；
+//      · 探测到、已配对 → **允许开始** —— **不管助手是不是处于「暂停」**（暂停只是"连着但
+//        没在采音频"：页面收静音帧、识别照常，用户在助手窗口点「启动」就直接出声）。
+//      · 握手连不上（助手刚好退出/令牌失效）→ `never_connected` → **停掉**这场会话，
+//        绝不留"看着在跑、其实永远没字幕"的空会话；
+//      分界线就是"连上过没有"：连上过再掉线才降级成静音（下面 ④ 与 HELPER_SILENT_CODES）。
 //   ③ 令牌存平台 storage（扩展=chrome.storage.local，Web=localStorage），
 //      之后每次开始识别直接用，不再打扰用户；
 //   ④ **助手窗口有总开关（默认暂停）**：暂停时不打开采集设备、只推全零帧保持流不断；
@@ -97,18 +103,21 @@ export function helperBaseUrl(port: number): string {
 /**
  * 哪些助手错误码属于**静音降级**（不是故障，别把会话连模型一起拆掉）。
  *
- * 产品决定（2026-10-05）：桌面助手音源"没启动/没配对/暂停"都是常态，此刻就是静音，
- * 识别照常跑。扩展端 offscreen 与 Web 宿主必须用同一份清单——两处各写一份正是上一轮
- * 审查抓到的"两端行为不一致"。
+ * 规则（用户澄清后的原意）：判断的是"**有没有连上**"，不是"有没有声音"。
+ *   * 没连上 → **不该开始**：面板那层直接拦（`!helperInfo` 弹说明框、未配对弹配对框），
+ *     万一还是连不上（握手被拒），走 `never_connected` → ERROR 把会话停掉，绝不留一场
+ *     "看着在跑、其实永远没字幕"的空会话。
+ *   * 连上了但暂时没声音（助手窗口处于「暂停」）→ 静音降级，会话照常跑。
+ *   * 连上过之后掉线（助手中途退出）→ 也保持静音降级，不拆会话（用户只是没声音）。
  *
  * 逐个说明：
- *   * `connect_failed` / `ws_closed` —— 助手没在运行、端口不对、进程中途退出；
- *   * `paused` —— 助手窗口的总开关（**默认暂停**）：助理对 `start` 回 ERR_PAUSED；
+ *   * `connect_failed` —— WebSocket 都没构造出来（端口非法 / CSP 拦了 ws://127.0.0.1）；
+ *   * `ws_closed` —— **连上过**之后断开（助手中途退出）；
+ *   * `paused` —— 助手窗口的总开关（**默认暂停**）：助手对 `start` 回 ERR_PAUSED；
  *   * `forbidden` / `not_paired` —— 令牌没被接受：页面需要重新配对，但会话本身照常跑，
  *     把它当 ERROR 会平白拆掉一整场。**注意（独立审查实测）：坏令牌时助手是在握手层回
- *     HTTP 403，浏览器只给 onclose，页面实际看到的是 `ws_closed`；这两个码只可能出现在
- *     `/api/pair` 的响应里**（那条走 helperErrorMessage，不经过这里）。列进来是防御未来
- *     协议变化 —— 真出现时也应该是"静音 + 提示重配"，而不是拆会话。
+ *     HTTP 403，浏览器只给 onclose，页面实际看到的是"从没连上"→ `never_connected`；这两个码
+ *     只可能出现在 `/api/pair` 的响应里**，列进来是防御未来协议变化。
  */
 const HELPER_SILENT_CODES = ('connect_failed,ws_closed,paused,forbidden,not_paired').split(',');
 
@@ -305,6 +314,8 @@ export class HelperSource {
   private opts: HelperSourceOptions;
   private ws: WebSocket | null = null;
   private stopping = false;
+  /** 这次连接是否**真的建立过**（onopen 过的）。用来区分"启动失败"与"运行中掉线"。 */
+  private opened = false;
   private sampleRate = HELPER_SAMPLE_RATE;
 
   constructor(opts: HelperSourceOptions) {
@@ -329,6 +340,7 @@ export class HelperSource {
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
     ws.onopen = () => {
+      this.opened = true;
       this.log('已连接，请求开始采集');
       try {
         ws.send(JSON.stringify({ type: 'start', source: this.opts.source || 'system' }));
@@ -341,6 +353,15 @@ export class HelperSource {
     ws.onclose = () => {
       this.ws = null;
       if (this.stopping) return;
+      // 坑（用户澄清的规则："没连上就不该开始"）：**从没连上过**与"连上后断了"必须分开——
+      //   * 从没连上（握手被拒/助手刚退出）：它就是一次失败的启动，必须走 ERROR 把会话停掉，
+      //     否则页面看着在跑、其实一句字幕都不会有（用户抱怨的就是这个）；
+      //   * 连上过再断（助手中途退出）：保持静音降级，不拆会话（决定 3）。
+      // 协议里握手相关的两个码不是静音码，所以 ERROR 分支会收敛掉这场会话。
+      if (!this.opened) {
+        this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperNeverConnected'), 'never_connected');
+        return;
+      }
       // 非主动关闭：明确告诉用户，别让它变成"界面在跑、永远没字幕"的幽灵会话
       this.opts.onError?.(tSync(this.opts.lang || 'zh_CN', 'helperWsClosed'), 'ws_closed');
     };

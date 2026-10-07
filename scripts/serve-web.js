@@ -84,8 +84,10 @@ const server = http.createServer((req, res) => {
   if (range) {
     const m = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
     if (m && (m[1] || m[2])) {
-      let start: number;
-      let end: number;
+      // 坑（全盲审查实测）：这里曾是 `let start: number;` 的 TS 注解 —— .js 文件里 node 直接
+      // SyntaxError，`npm run serve:web`（README 承诺的本地预览首选入口）第一步就崩。
+      let start;
+      let end;
       if (!m[1]) {
         // suffix：请求最后 m[2] 字节
         const n = Number(m[2]);

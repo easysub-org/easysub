@@ -17,6 +17,7 @@
     "dev": "webpack --mode development --watch",
     "dev:web": "webpack --mode development --watch --env target=web",
     "typecheck": "tsc --noEmit",
+    "test": "node --test \"tests/*.test.mjs\"",
     "serve:web": "node scripts/serve-web.js"
   },
   "devDependencies": {

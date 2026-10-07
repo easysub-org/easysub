@@ -23,6 +23,7 @@ import {
   HelperInfo, HelperSession, helperErrorMessage, loadHelperSession, pairHelper, probeHelper, saveHelperSession,
   HELPER_RELEASES_URL,
 } from './helper';
+import { evaluateHelperGate } from './helper-gate';
 
 const $ = (id: string) => document.getElementById(id)!;
 // 可选元素（Web 版外壳独有）：扩展 popup 模板里没有这些 id，取值一律走这里，
@@ -132,20 +133,17 @@ micErrOk.onclick = () => { micErrModal.hidden = true; };
 micErrModal.onclick = (e) => { if (e.target === micErrModal) micErrModal.hidden = true; };
 
 // —— 桌面助手·配对（两端共用）——
-// 产品决定（2026-10-05 修正）：音源**常驻显示**、介绍固定一句常态文案；**没启动/没配对/
-// 暂停都不拦启动**（空音频=静音帧，识别照常）——只有「检测到了但未配对」才在点开始时弹配对框。
+// 产品决定（2026-10-05，**用户澄清后修正**）：音源**常驻显示**、介绍固定一句常态文案；
+// **没连上就不许开始** —— 裁决只有三态（见 src/helper-gate.ts，规则原文与回归测试都在那）：
+//   · 探测不到助手（没运行/没装/端口不在范围）→ 弹「助手没在运行」说明框 + 下载链接；
+//   · 探测到但没配对 → 弹配对框（「取消」= 放弃这次启动）；
+//   · 探测到且已配对 → **放行** —— 不管助手是不是处于「暂停」（暂停只是"连着但没在采音频"，
+//     页面收静音帧、识别照常；用户在助手窗口点「启动」就直接出声）。
 // 助手会把本机音频交给任何连上来的页面，所以配对码只显示在用户自己启动的助手窗口里，
 // 它就是"用户在场"的证明；配对成功后换长期设备令牌，之后不再打扰用户。
 let helperInfo: HelperInfo | null = null;
 let helperSession: HelperSession | null = null;
 let helperContinuation: (() => void) | null = null;
-//: 用户在配对框上点过「取消」（= "这次先不配对，照样开始"）。本次会话内不再弹框，
-//: 因为产品决定是"没配对也允许启动、此刻就是静音"——没有这个开关的话，配对框一弹出来
-//: 用户就只能"配对"或"放弃启动"，与决定 1 冲突。
-//: 复位点：**会话结束**（`setStatus('Stopped')`，覆盖面板停止按钮 / 从字幕浮窗停止 / ERROR
-//: 收敛——只挂面板按钮会在 Web 上漏掉浮窗那条路）、换音源、配对成功。取消处理里会在
-//: `setStatus('Stopped')` **之后**再置位，避免立刻重弹。
-let helperPairSkipped = false;
 
 const helperPairModal = $opt('helperPairModal') as HTMLDivElement | null;
 const helperPairCodeEl = $opt('helperPairCode') as HTMLInputElement | null;
@@ -171,6 +169,49 @@ function hideHelperPairModal() {
   if (helperPairModal) helperPairModal.hidden = true;
   if (helperPairCodeEl) helperPairCodeEl.value = '';
 }
+
+// —— 桌面助手没连上（**不许开始**）——
+// 用户原话：助手软件都没打开、根本没连接，点开始还能启动？那就是一场纯静音会话。
+// 所以这里的规则是：**连不上就不启动**，并把原因和出路讲清楚。
+// （与之相对：助手在跑但处于「暂停」= 连着，只是没在采音频 —— 那种情况允许开始，静音帧照推。
+//  区别就在"有没有连上"，不是"有没有声音"。）
+const helperOfflineModal = $opt('helperOfflineModal') as HTMLDivElement | null;
+function showHelperOfflineModal() {
+  if (!helperOfflineModal) return;
+  const t = (k: string) => tSync(currentLang, k);
+  const titleEl = $opt('helperOfflineTitleEl');
+  const bodyEl = $opt('helperOfflineBodyEl');
+  const linkEl = $opt('helperOfflineLinkEl');
+  const okBtn = $opt('helperOfflineOk');
+  if (titleEl) titleEl.textContent = t('helperOfflineTitle');
+  if (bodyEl) {
+    // 非扩展（Web 版）部署在别的域名时，连不上多半是助手没放行这个站点 —— 把那句指引也带上，
+    // 否则用户只会看到"助手没运行"，而助手明明开着（CORS 被浏览器拦掉了）。
+    let body = t('helperOfflineBody');
+    if (!IS_EXTENSION) {
+      try {
+        const host = location.hostname.toLowerCase();
+        const loopback = host === 'localhost' || host === 'localhost.localdomain'
+          || host === '::1' || host === '[::1]' || /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host);
+        if (!loopback) {
+          const origin = location.origin && location.origin !== 'null'
+            ? location.origin : location.protocol + '//';
+          body += ' ' + t('helperCorsOriginHint').split('{origin}').join(origin);
+        }
+      } catch { /* location 不可用：只显示通用说明 */ }
+    }
+    bodyEl.textContent = body;
+  }
+  if (linkEl) {
+    linkEl.innerHTML = `${escapeHtml(t('helperReleases'))} <a href="${HELPER_RELEASES_URL}" target="_blank" rel="noopener noreferrer">${HELPER_RELEASES_URL}</a>`;
+  }
+  if (okBtn) okBtn.textContent = t('helperOfflineOk');
+  helperOfflineModal.hidden = false;
+}
+function hideHelperOfflineModal() {
+  if (helperOfflineModal) helperOfflineModal.hidden = true;
+}
+$opt('helperOfflineOk')?.addEventListener('click', () => hideHelperOfflineModal());
 function showHelperPairError(text: string) {
   if (!helperPairErrEl) return;
   helperPairErrEl.textContent = text;
@@ -184,7 +225,12 @@ async function submitHelperPair() {
   const port = helperInfo?.port;
   const code = (helperPairCodeEl?.value || '').trim();
   if (!port) { showHelperPairError(tSync(currentLang, 'helperNotFound')); return; }
-  if (!code) return;
+  if (!code) {
+    // 坑（全盲审查指出）：空码以前是静默 return——按钮像坏了。给一行错误 + 把焦点放回输入框。
+    showHelperPairError(tSync(currentLang, 'helperPairEmptyCode'));
+    helperPairCodeEl?.focus();
+    return;
+  }
   if (helperPairErrEl) helperPairErrEl.hidden = true;
   const res = await pairHelper(port, code);
   if (!res.ok) {
@@ -193,7 +239,6 @@ async function submitHelperPair() {
     return;
   }
   helperSession = { port, token: res.token, label: res.label, pairedAt: Date.now() };
-  helperPairSkipped = false;          // 配对成功：之后正常不再弹框（本就来问"要不要配"）
   await saveHelperSession(helperSession);
   hideHelperPairModal();
   log(tSync(currentLang, 'helperPairSuccess'));
@@ -204,18 +249,12 @@ async function submitHelperPair() {
 if (helperPairModal) {
   $opt('helperPairSubmit')?.addEventListener('click', () => { void submitHelperPair(); });
   $opt('helperPairCancel')?.addEventListener('click', () => {
-    // 取消 = "这次先不配对，照样开始"（产品决定：没配对也允许启动，此刻是静音）。
-    // 坑（独立审查指出的张力）：旧代码这里是 setStatus('Stopped') + return —— 于是
-    // "探测到助手但没配对"时用户**永远无法静音启动**。
-    // 顺序很关键：`setStatus('Stopped')` 会把 helperPairSkipped 复位（见 setStatus 里的注释，
-    // 那是为了覆盖"从浮窗停止"等所有停止路径），所以标志必须在它**之后**再置位，
-    // 否则 doStart 读到的还是 false → 立刻又弹一次配对框（死循环）。
+    // 取消 = 放弃这次启动。**不是**"先不配对、照样开始"：没有令牌就连不上助手，而按用户原意
+    // 「没连上就不该开始」，取消后必须停在停止态（否则又是一场纯静音会话，正是用户抱怨的坑）。
     helperContinuation = null;
     hideHelperPairModal();
     updateSourceHint();
     setStatus('Stopped');
-    helperPairSkipped = true;
-    void doStart();
   });
   helperPairCodeEl?.addEventListener('keydown', (e) => {
     if ((e as KeyboardEvent).key === 'Enter') void submitHelperPair();
@@ -227,7 +266,7 @@ let detectGeneration = 0;
 // 探测本机助手：**音源常驻显示**，介绍固定一句常态文案（不再随启动/配对状态切换）。
 // 产品决定（2026-10-05 修正）：不再"探测不到就藏起来"——用户实测在 dist-web 里根本找不到这个
 // 音源（CORS/端口一变探测就失败），于是连"该怎么配对"都无从下手。现在改成：
-// 音源一直在列表里；**没启动/没配对/暂停都不拦启动**（空音频=静音帧，识别照常），
+// 音源一直在列表里（介绍不随状态变化）；**没连上就不许开始**（见 doStart 的门卫），
 // 只有"检测到但未配对"才在点开始时弹配对模态（没有令牌，助手的 /ws 反正会拒，先问清楚）。
 // 探测结果仍有两个用处：配对框要用端口；端口语/助手重启后回写漂移的端口。
 async function detectHelper(full = false) {
@@ -626,7 +665,7 @@ function updateSourceHint() {
   }
   if (selSource.value === 'helper') {
     // 产品决定（2026-10-05）：**不再区分"启没启动/配没配对"**——一句常态介绍固定显示。
-    // 助手是否在跑只影响"有没有声音"（没启动 = 空音频/静音帧，识别照常），
+    // 助手是否在跑只影响"有没有声音"（连上了但助手暂停 = 静音帧，识别照常），
     // 不影响这个音源的说明。（原先是四种状态各一句，介绍跟着探测结果变来变去。）
     // 助手音源是**实验性**的：提示里附上助手仓库的 Releases 地址（还没装 / 想升级的人
     // 直接点过去）。用 DOM 拼 <a> 而不是 innerHTML —— 文案来自 i18n，不该被当 HTML 解析。
@@ -1088,12 +1127,6 @@ function setStatus(status: string, startedAt?: number) {
     levels = [];
     if (chkWaveform.checked) drawWave();
     statusWordEl.textContent = tSync(currentLang, hasStarted ? 'stateStopped' : 'stateReady');
-    // 任何"会话结束"都该重新给一次配对机会（独立审查抓的 F1）：只挂面板自己的停止按钮不够——
-    // Web 版从**字幕浮窗**停止（工具条/关画中画/关浮窗）走的是 host.stopSession()，面板只会收到
-    // STATUS_CHANGED:Stopped，复位点就漏了。放这里覆盖全部停止路径（面板按钮、浮窗、ERROR 收敛）。
-    // 注意**不能**反过来担心死循环：取消处理是先 setStatus('Stopped') 再置 helperPairSkipped=true，
-    // 顺序保证 doStart 读到的仍是 true（见 helperPairCancel 的注释）。
-    helperPairSkipped = false;
   }
 }
 
@@ -1240,8 +1273,6 @@ selSource.onchange = () => {
   // 换了音源就作废"已确认过系统音频说明"：否则用户确认后切走再切回来，
   // 会被当成已确认而直接弹选择器（少了一道说明，也违背"每次重新开始都讲一遍"）。
   pickConfirmPassed = false;
-  // 用户主动换过音源：把"这次先不配对"的记忆清掉——下次再选回助手时该重新问一次
-  helperPairSkipped = false;
   savePrefs({ audioSource: v });
   // 用户主动选了「桌面助手」：这时候值得全端口扫一遍（助手可能不在默认端口上）
   if (v === 'helper') void detectHelper(true);
@@ -1268,7 +1299,7 @@ selSource.onchange = () => {
 let pickConfirmPassed = false;
 async function doStart(): Promise<void> {
   const pendingSource: AudioSourceId = readSelectedSource();
-  // 桌面助手音源：**没启动/没配对/暂停都不拦启动**（空音频=静音帧，识别照常）。
+  // 桌面助手音源：**没连上就不许开始**（助手没运行/没配对 → 拦在门口，不启动）。
   // 只有「探测到了但未配对」才弹配对模态（配对码换来的设备令牌是助手认这个页面的唯一凭据；
   // 没有令牌，助手的 /ws 反正会拒，不如先问清楚）。用户提交成功后由 continuation 重走 doStart。
   // 位置刻意排在"系统音频·选择器说明"之前：两者互不相干，别让用户先读一遍无关说明。
@@ -1277,21 +1308,27 @@ async function doStart(): Promise<void> {
     // 「暂停」）。用缓存的 helperInfo 判断会形成死循环 —— 提示"请在助手窗口点启动"，用户去点了、
     // 回来再点「开始」，仍然读到旧的 paused=true。Web 版页面常驻，必然复现。
     await detectHelper(true);
-    // 产品决定（2026-10-05）：**不再要求助手已启动/已配对才能点开始**。
-    // 助手没启动 → 这条音源就是空音频（静音帧），识别照常进行，用户看到的只是"没字"。
-    // 助手在跑（**含暂停**）但没配对 → 弹配对框：没有令牌，助手的 /ws 反正会拒，不如先问清楚。
-    // 坑：这里**不能**加 `&& !helperInfo.paused`（独立审查抓的 major）——助手窗口的总开关
-    // **默认就是暂停**，加了这一条等于"新用户装好助手、点开始"这条主路径永远拿不到配对入口：
-    // 页面既没连上 WS（用户在助手窗口点「启动」也不会出声，协议只在已连时广播），
-    // 又会一直静音，用户完全没有下一步。配对接口本身不检查暂停（server.handle_pair 只看
-    // Origin + 配对码），所以暂停时弹框、提交都能正常工作。
-    if (!helperSession && helperInfo && !helperPairSkipped) {
-      // 检测到了但未配对：弹配对框；配对成功后由 continuation 重走 doStart
+    // 产品决定（2026-10-05，**用户澄清后修正**）：能不能开始，看的是"**有没有连上助手**"，
+    // 不是"有没有声音"。裁决抽成了纯函数 `evaluateHelperGate`（src/helper-gate.ts），
+    // 规则原文与回归测试都在那里 —— 改门卫先改它、再跑 `npm test`。
+    const action = evaluateHelperGate(helperInfo, !!helperSession);
+    if (action === 'offline') {
+      // 助手没运行 / 没安装 / 探测不到：不启动，弹说明框 + 下载链接。这条音源完全依赖
+      // 助手进程，没连上就点开始只会得到一场纯静音会话 —— 用户实测反馈的原话就是
+      // "助手软件都没打开、根本没连接，点开始还能给我启动？"。
+      showHelperOfflineModal();
+      setStatus('Stopped');
+      log(tSync(currentLang, 'helperOfflineLog'));
+      return;
+    }
+    if (action === 'pair') {
+      // 连得上但没配对：弹配对框（没有令牌连不上）；配对成功后由 continuation 重走 doStart。
       helperContinuation = () => { void doStart(); };
       showHelperPairModal();
       setStatus('Stopped');
       return;
     }
+    hideHelperOfflineModal();   // start：连得上且已配对（暂停与否都不拦，静音降级在后面兜着）
   }
   // 系统音频：先把"浏览器不能单独授权音频、画面流授权后立刻销毁、记得勾上分享音频"
   // 三件事讲清楚，用户点确认后才进入下面的取流链路。
@@ -1371,6 +1408,18 @@ async function doStart(): Promise<void> {
     return;
   }
   const source: AudioSourceId = readSelectedSource();
+  // 坑（独立审查指出的极窄窗口）：门卫用的是**点击时**的 pendingSource，而这里重新读了一次
+  // 选择器 —— 用户在门卫探测的亚秒级窗口内把下拉切走，就会发出一条**门卫没检过**的
+  // helper START（有旧令牌时甚至能连上）。音源变了就中止本次启动，让用户带着新选择
+  // 重新点「开始」——门卫会按新音源重跑。
+  if (source !== pendingSource) {
+    releasePreStream();
+    setStatus('Stopped');
+    // 与同级中止路径（system 不支持/模型失败等）一致：清掉"已确认过选择器说明"的标志，
+    // 否则用户切回 system 再点开始会跳过说明框直接弹选择器。
+    pickConfirmPassed = false;
+    return;
+  }
   // 坑：不支持平台选了 system 时【必须明确拦下并说明】，不能静默降级成 tab——
   // 降级会让用户以为系统音频能用、只是没声音，排查方向完全错。
   if (source === 'system' && !SYSTEM_AUDIO_SUPPORTED) {
@@ -1438,7 +1487,7 @@ $('btnCompat').onclick = () => { void openCompatCheck(); };
 
 btnStop.onclick = () => {
   sendToHost({ type: 'STOP_RECOGNITION' }).catch(() => {});
-  setStatus('Stopped');       // 复位 helperPairSkipped 就在 setStatus 里（覆盖浮窗停止等全部路径）
+  setStatus('Stopped');
 };
 
 // —— ASR 模型缺失引导（nomodel 版安装包）——

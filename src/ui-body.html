@@ -59,9 +59,11 @@
         <option value="tab" id="optSourceTab">当前标签页</option>
         <option value="system" id="optSourceSystem">系统音频（整个屏幕）</option>
         <option value="mic" id="optSourceMic">麦克风</option>
-        <!-- 桌面助手音源：**常驻显示**（探测不到也看得见）。介绍固定一句话、不随状态变化；
-             没启动/没配对/助手处于暂停**都不拦启动**（此刻就是静音，识别照常），
-             只有"探测到了但还没配对"才在点开始时弹配对框 —— 见 panel.ts 的 doStart/detectHelper -->
+        <!-- 桌面助手音源：**常驻显示**（探测不到也看得见）。介绍固定一句话、不随状态变化。
+             启动规则（用户澄清后的原意）：**没连上助手就不许开始**（助手没运行/没安装/没配对
+             → 停在停止态并弹说明或配对框）；探测到且已配对 → 放行，**不管助手是不是处于
+             「暂停」**（暂停时页面收静音帧、识别照常，用户在助手窗口点「启动」就直接出声）。
+             判断的是"有没有连上"，不是"有没有声音" —— 规则原文与测试见 src/helper-gate.ts。 -->
         <option value="helper" id="optSourceHelper">桌面助手</option>
       </select>
       <svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
@@ -504,12 +506,28 @@
     </div>
   </div>
 
+  <!-- 桌面助手没连上·模态（两端共用）：**没连上就不该开始**——这条音源完全依赖本机助手，
+       助手没运行/没安装时点开始只会得到一场静音会话（用户实测反馈：这就是个坑）。
+       与配对框的区别：配对框是"连得上但没令牌"，这里是"根本连不上"。 -->
+  <div class="unsup-mask" id="helperOfflineModal" hidden>
+    <div class="unsup-card" role="dialog" aria-modal="true" aria-labelledby="helperOfflineTitleEl">
+      <div class="unsup-head">
+        <svg class="unsup-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8"/><path d="M12 16v4"/></svg>
+        <span id="helperOfflineTitleEl"></span>
+      </div>
+      <p class="unsup-body" id="helperOfflineBodyEl"></p>
+      <p class="unsup-body" id="helperOfflineLinkEl"></p>
+      <div class="unsup-actions">
+        <button type="button" class="unsup-btn primary" id="helperOfflineOk"></button>
+      </div>
+    </div>
+  </div>
+
   <!-- 桌面助手配对·模态（两端共用）：助手会把本机音频交给任何连上来的页面，所以首次必须用
        配对码换取设备令牌（配对码只显示在用户自己启动的助手窗口里，= 用户在场的证明）。
-       音源本身是常驻显示的；弹出条件：选了助手音源 + 探测到了助手（/api/pair/info 明确答
-       app=easysub-helper）+ 本浏览器还没有令牌，且**没有点过「取消」**（点过之后本次会话
-       不再打扰；会话一结束就恢复——见 panel.ts 的 helperPairSkipped）。
-       点「取消」= 这次先不配对、照样静音开始。 -->
+       音源本身是常驻显示的；弹出条件：选了助手音源 + 探测到了助手 + 本浏览器还没有令牌。
+       点「取消」= **放弃这次启动**（没有令牌就连不上助手，而"没连上就不许开始"——
+       不会出现"先不配对、照样静音开始"）。会话一结束，下次开始会重新弹框。 -->
   <div class="unsup-mask" id="helperPairModal" hidden>
     <div class="unsup-card" role="dialog" aria-modal="true" aria-labelledby="helperPairTitleEl">
       <div class="unsup-head">
