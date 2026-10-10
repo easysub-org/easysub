@@ -31,12 +31,12 @@ import { tSync } from './i18n';
 // 端口规划的纯函数单独成文件（能写单测）；这里转出，保持既有 import 路径不变
 import {
   HELPER_DEFAULT_PORT, HELPER_PORT_MAX, HELPER_PORT_MIN, HELPER_PORT_SCAN,
-  HELPER_PROBE_QUICK_PORTS, helperPorts,
+  HELPER_PROBE_QUICK_PORTS, helperPorts, probePortsFor,
 } from './helper-ports';
 
 export {
   HELPER_DEFAULT_PORT, HELPER_PORT_MAX, HELPER_PORT_MIN, HELPER_PORT_SCAN,
-  HELPER_PROBE_QUICK_PORTS, helperPorts,
+  HELPER_PROBE_QUICK_PORTS, helperPorts, probePortsFor,
 };
 
 export const HELPER_SAMPLE_RATE = 16000;
@@ -205,13 +205,17 @@ export async function probeHelper(
   opts: { full?: boolean; token?: string; ports?: number[] } = {},
 ): Promise<HelperInfo | null> {
   // 指定端口优先：面板里"手动填端口"那条路要能直接探用户输入的那一个
-  // 坑（复审抓到的**无限循环**）：这里以前是 `helperPorts((await storedPort()) ?? (await storedPreferredPort()), …)`
+  // 坑（复审抓到的**无限循环**）：这里以前是 `(await storedPort()) ?? (await storedPreferredPort())`
   // —— 已配对用户的 storage 里必然有旧会话端口，`??` 于是把用户**手填的端口整个吃掉**：
   // 填 9000 → 探到 → 存下 → 重新开始 → 又只探 8790–8810 → 同一个离线框弹回来，页内没有出路。
-  // 现在两个端口**都进探测列表**，手填的排前面（用户刚明确指定过它）。
-  const ports = opts.ports && opts.ports.length
-    ? opts.ports
-    : helperPorts([await storedPreferredPort(), await storedPort()], opts.full === true);
+  // 现在交给 probePortsFor（纯函数、**有单测护着调用点**）：手填的排前面，会话端口也保留。
+  let ports = opts.ports;
+  if (!ports || !ports.length) {
+    const [sessionPort, preferredPort] = await Promise.all([storedPort(), storedPreferredPort()]);
+    // 内存兜底：写 storage 失败时（隐私模式/配额），手填的端口至少本次会话内还算数，
+    // 否则"存不下 → 下次不探 → 同一个框弹回来"的循环会以更隐蔽的方式复活（复审 minor-5）。
+    ports = probePortsFor(sessionPort, preferredPort ?? memoryPreferredPort, opts.full === true);
+  }
   // 带令牌探测是**必须**的：助手侧 `paired` 的语义是"本次请求带的令牌是否有效"
   // （server.py handle_pair_info + _token_from_request），不带令牌恒为 false —— 那样每次打开
   // 面板都会被当成"没配对过"，逼用户重输配对码，"只配一次"的承诺直接失效。
@@ -225,10 +229,14 @@ export async function probeHelper(
 
 /** 记住用户手动指定的端口：下次探测（含 quick 探测）会优先打它。 */
 export async function saveHelperPreferredPort(port: number): Promise<void> {
+  memoryPreferredPort = port;                    // 见 probeHelper 里的"内存兜底"
   try {
     await storage.set({ [PREFERRED_PORT_KEY]: port });
-  } catch { /* 存不下也不致命：本次仍会用显式端口探测 */ }
+  } catch { /* 存不下也不致命：内存里还留着，本次会话内仍然会探它 */ }
 }
+
+//: 手填端口的内存副本（storage 写失败时的兜底，见 probeHelper）
+let memoryPreferredPort: number | undefined;
 
 /** 读回用户手填并成功探到过的端口（离线框用它预填输入框）。 */
 export async function loadHelperPreferredPort(): Promise<number | undefined> {

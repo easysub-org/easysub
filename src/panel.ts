@@ -176,6 +176,25 @@ function hideHelperPairModal() {
 // （与之相对：助手在跑但处于「暂停」= 连着，只是没在采音频 —— 那种情况允许开始，静音帧照推。
 //  区别就在"有没有连上"，不是"有没有声音"。）
 const helperOfflineModal = $opt('helperOfflineModal') as HTMLDivElement | null;
+/**
+ * 给消息套一次「错误：」前缀，但**已经套过就不再套**。
+ *
+ * 两个坑（复审指出）：
+ *  1. 助手运行期错误在宿主里是用**会话语言**预先套好前缀的（offscreen/host 的 helperLang/msgLang），
+ *     而这里只有 currentLang —— 会话中途切语言就会变成「错误：Error: …」。所以判断要**语言无关**：
+ *     把两种语言的前缀都试一遍。
+ *  2. 万一某语言的模板不含 `{m}`，`split('{m}')[0]` 会等于整串 → 判断落空 → replace 空操作 →
+ *     整条消息被丢掉。所以模板里没有 `{m}` 时退回"前缀 + 原文"。
+ */
+function withErrorPrefix(raw: string): string {
+  const heads = ['zh_CN', 'en']
+    .map((lang) => tSync(lang, 'errorPrefix').split('{m}')[0])
+    .filter((head) => head.length > 0 && head !== 'errorPrefix');
+  if (heads.some((head) => raw.startsWith(head))) return raw;
+  const template = tSync(currentLang, 'errorPrefix');
+  return template.includes('{m}') ? template.replace('{m}', raw) : template + raw;
+}
+
 function showHelperOfflineModal(reason: 'offline' | 'too_old' = 'offline') {
   if (!helperOfflineModal) return;
   const t = (k: string) => tSync(currentLang, k);
@@ -251,10 +270,12 @@ async function retryHelperPort(): Promise<void> {
     return;
   }
   await saveHelperPreferredPort(port);
-  log(tSync(currentLang, 'helperPortFound').split('{port}').join(String(port)));
+  const foundMsg = tSync(currentLang, 'helperPortFound').split('{port}').join(String(port));
   hideHelperOfflineModal();
   helperInfo = null;              // 让 doStart 用刚记住的端口重新探测
-  void doStart();
+  // 关键：这条成功文案要**在 doStart 之后**写 —— doStart 里的 setHeroLoading 会用
+  // "正在加载模型…"覆盖状态行，先写就等于用户根本看不到（复审 minor-2）。
+  void doStart().then(() => log(foundMsg));
 }
 function showHelperPairError(text: string) {
   if (!helperPairErrEl) return;
@@ -2324,8 +2345,7 @@ onMessageFromHost((msg) => {
       // 又一类坑（复审抓到）：助手侧运行期错误在 helper.helperErrorMessage 里**已经**套过
       // 一次 errorPrefix，这里再套一次就变成"错误：错误：…"。所以先看是否已带前缀。
       const raw = String(msg.message ?? '');
-      const prefix = tSync(currentLang, 'errorPrefix').split('{m}')[0];
-      log(raw.startsWith(prefix) ? raw : tSync(currentLang, 'errorPrefix').replace('{m}', raw));
+      log(withErrorPrefix(raw));
       // 麦克风启动失败升级为模态：授权框没出现就闪退时，这是用户唯一读得到原因的地方
       if (msg.micFailure) showMicErrorModal(String(msg.message || ''));
       setStatus('Stopped');
