@@ -185,22 +185,11 @@ function showHelperOfflineModal() {
   const okBtn = $opt('helperOfflineOk');
   if (titleEl) titleEl.textContent = t('helperOfflineTitle');
   if (bodyEl) {
-    // 非扩展（Web 版）部署在别的域名时，连不上多半是助手没放行这个站点 —— 把那句指引也带上，
-    // 否则用户只会看到"助手没运行"，而助手明明开着（CORS 被浏览器拦掉了）。
-    let body = t('helperOfflineBody');
-    if (!IS_EXTENSION) {
-      try {
-        const host = location.hostname.toLowerCase();
-        const loopback = host === 'localhost' || host === 'localhost.localdomain'
-          || host === '::1' || host === '[::1]' || /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host);
-        if (!loopback) {
-          const origin = location.origin && location.origin !== 'null'
-            ? location.origin : location.protocol + '//';
-          body += ' ' + t('helperCorsOriginHint').split('{origin}').join(origin);
-        }
-      } catch { /* location 不可用：只显示通用说明 */ }
-    }
-    bodyEl.textContent = body;
+    // 只讲"助手没在运行、去启动它"这一件事。
+    // 以前这里还会在非回环页面上追加"让助手放行这个站点（--allow-cors-all）"的指引 ——
+    // 那条已经过时且会误导：助手**默认 CORS 全放行**（产品要求，不做手动设置），
+    // 部署在任何域名的 Web 版开箱即用，没有"要用户自己去放行"这回事。
+    bodyEl.textContent = t('helperOfflineBody');
   }
   if (linkEl) {
     linkEl.innerHTML = `${escapeHtml(t('helperReleases'))} <a href="${HELPER_RELEASES_URL}" target="_blank" rel="noopener noreferrer">${HELPER_RELEASES_URL}</a>`;

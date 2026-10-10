@@ -142,28 +142,6 @@ function isLoopbackPage(): boolean {
   return !!v4 && v4.slice(1).every((part) => Number(part) <= 255);
 }
 
-// 坑（独立审查抓的 major）：Web 版部署在**别的域名**（官方发布的 GitHub Pages、预览站等）时，
-// 助手的 Origin 白名单默认不放行这个来源 → 浏览器把 /api/pair/info 的响应整个拦掉（CORS），
-// 探测一律失败。页面这边只能看到"没有助手"，于是配对框永远不出现、只剩一行静音日志——
-// 而用户其实需要的是"让助手放行这个站点"。**这不是状态提示，是可执行的补救指引**，
-// 所以只在非回环页面追加，回环页面（正常自建场景）一个字都不多说。
-function withOriginHint(message: string): string {
-  if (isLoopbackPage()) return message;
-  try {
-    // 坑：这个文案里 `{origin}` 出现**两次**（"本页地址（{origin}）"与 "--allow-origin {origin}"），
-    // 而 String.replace 只换第一个 —— 第二条命令会原样打出 `{origin}`（独立审查实测）。
-    // 用 split/join 全量替换（不依赖 replaceAll 的 ES2021 目标）。
-    // file:// 页面没有 origin（字符串 "null"）：写成 "file://" 也比"本页地址（null）"可读。
-    const origin = location.origin && location.origin !== 'null'
-      ? location.origin
-      : location.protocol + '//';
-    const hint = tSync(msgLang, 'helperCorsOriginHint').split('{origin}').join(origin);
-    return message + ' ' + hint;
-  } catch {
-    return message;
-  }
-}
-
 // 桌面助手音频源：WS 由本宿主持有（面板页就是引擎宿主），PCM 直接喂进识别管道。
 // 令牌从 storage 读——面板配对成功后会写进去，这里不重复探测（避免两处状态不一致）。
 async function startHelperSource(isStale: () => boolean) {
@@ -178,7 +156,7 @@ async function startHelperSource(isStale: () => boolean) {
     // 文案要与"只在没有令牌时发送"这一事实一致：别说"没在运行"（用户窗口可能开着），
     // 也别提"暂停"（那由 ERR_PAUSED → helperPaused 那条路负责）；且这是单行日志区，
     // 没有链接可点，别写"在下方链接下载"。
-    emitToPanel({ type: 'HELPER_SILENT', message: withOriginHint(tSync(msgLang, 'helperSilentGeneric')) });
+    emitToPanel({ type: 'HELPER_SILENT', message: tSync(msgLang, 'helperSilentGeneric') });
     return;
   }
   helper = new HelperSource({

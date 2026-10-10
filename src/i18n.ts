@@ -251,7 +251,6 @@ const strings: Record<string, Record<string, string>> = {
     helperOfflineBody: '「桌面助手」这条音源要靠本机运行的助手软件采集音频：没连上它就没有音频可识别，所以这次没有开始。请先打开助手（窗口底部日志里有「正在监听」字样），再回到这里点「开始」。',
     helperOfflineLog: '桌面助手没在运行（未探测到）：本次没有开始 —— 请先启动助手，再点「开始」',
     helperOfflineOk: '知道了',
-    helperCorsOriginHint: '另外：本页地址（{origin}）不在本机，助手默认只放行回环地址上的页面与浏览器扩展，所以探测被浏览器拦掉了。请改用 http://127.0.0.1 打开本页，或让助手以 --allow-cors-all 启动（等价于 --allow-origin {origin}）。',
     sourceHintMic: '识别麦克风采集到的声音。首次开始识别时会在悬浮字幕窗上弹出 Chrome 授权框（可在其中选择设备，浏览器会记住），字幕显示在悬浮窗。',
     micDenied: '未获得麦克风权限或设备不可用，识别未开始',
     // NotFoundError（系统无可用麦克风 / Windows 隐私设置禁用）时 Chrome 不弹授权框直接拒，
@@ -522,7 +521,6 @@ const strings: Record<string, Record<string, string>> = {
     helperOfflineBody: 'The "desktop helper" source captures audio through a helper app running on this machine: with no connection there is nothing to transcribe, so this start was not performed. Open the helper first (the bottom log of its window says "listening"), then come back and press Start.',
     helperOfflineLog: 'Desktop helper is not running (not detected): start cancelled — open the helper first, then press Start',
     helperOfflineOk: 'Got it',
-    helperCorsOriginHint: 'Note: this page is served from {origin}, which is not a loopback address — the helper only allows loopback pages and browser extensions by default, so the browser blocked the probe. Open this page via http://127.0.0.1, or start the helper with --allow-cors-all (equivalent to --allow-origin {origin}).',
     sourceHintMic: 'Transcribes what the microphone hears. On the first start, Chrome\'s permission prompt appears on the floating subtitle window (pick your device there — the browser remembers it); subtitles show in the floating window.',
     micDenied: 'Microphone permission denied or device unavailable — recognition not started',
     micNotFound: 'No microphone device detected — recognition not started. Make sure a mic is connected and usable; if it still fails, check that the OS privacy settings allow apps to access the microphone (Windows: Settings → Privacy & security → Microphone).',
