@@ -15,6 +15,12 @@ test('助手没运行/没装/探测不到 → offline（不启动）', () => {
   assert.equal(evaluateHelperGate(null, true), 'offline', '有旧令牌也一样拦：连不上就是连不上');
 });
 
+test('最低协议版本被钉住（防止悄悄抬高把正式版助手判成过旧）', () => {
+  // 助手仓 protocol.API_VERSION = 1。这个常量若被改成 2，所有正式版助手都会被判 too_old
+  // —— 纯相对断言的用例抓不到这种改动，所以这里钉绝对值。
+  assert.equal(HELPER_MIN_API, 1);
+});
+
 test('协议版本太旧 → too_old（引导更新助手，而不是说"没在运行"）', () => {
   // 老助手没有 api 字段：用户窗口就摆在眼前，说"没运行"是误导（可用性审查 S4）
   assert.equal(evaluateHelperGate({ paired: true }, true), 'too_old');

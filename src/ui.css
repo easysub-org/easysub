@@ -776,3 +776,10 @@ body[data-mode="light"] .unsup-card { box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2)
 .helper-port-row label { font-size: 12px; color: var(--text2); }
 .helper-port-row input { width: 78px; }
 .helper-port-hint { font-size: 11px; color: var(--text2); margin: 4px 0 0; }
+
+/* 离线框里的错误行（手动端口填错时的反馈）：以前用了没有定义的类名，成功/失败长得一模一样 */
+.unsup-error {
+  color: var(--err, #dc2626);
+  font-size: 12px;
+  margin: 6px 0 0;
+}

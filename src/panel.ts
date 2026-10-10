@@ -21,7 +21,7 @@ import { initCompatCheck, openCompatCheck } from './compat';
 // 本机助手（桌面端）：探测 → 配对 → 从桌面端取 16k PCM。产品纪律见 src/helper.ts 文件头。
 import {
   HelperInfo, HelperSession, helperErrorMessage, loadHelperSession, pairHelper, probeHelper, saveHelperSession,
-  HELPER_RELEASES_URL, saveHelperPreferredPort,
+  HELPER_RELEASES_URL, loadHelperPreferredPort, saveHelperPreferredPort,
 } from './helper';
 import { evaluateHelperGate } from './helper-gate';
 
@@ -187,13 +187,23 @@ function showHelperOfflineModal(reason: 'offline' | 'too_old' = 'offline') {
   const portLabel = $opt('helperPortLabelEl');
   const portRetry = $opt('helperPortRetry');
   const portHint = $opt('helperPortHintEl');
+  const portInput = $opt('helperPortInput') as HTMLInputElement | null;
   const portMsg = $opt('helperPortMsgEl');
   // 手动端口**只在"探不到"时**给：版本过旧是另一回事，填端口没用（反倒会让人以为要填端口）
+  // 端口行与它的说明是**两个**节点，必须一起藏：只藏输入框会留下一句"填端口"，
+  // 正好把用户引向一个不存在的控件（复审指出）。
   if (portRow) portRow.hidden = reason !== 'offline';
+  if (portHint) portHint.hidden = reason !== 'offline';
   if (portLabel) portLabel.textContent = t('helperPortLabel');
   if (portRetry) portRetry.textContent = t('helperPortRetry');
   if (portHint) portHint.textContent = t('helperPortHint');
   if (portMsg) { portMsg.hidden = true; portMsg.textContent = ''; }
+  if (portInput && reason === 'offline') {
+    // 预填上次成功用过的端口：失败一次就得重敲是很烦的（复审指出）
+    void loadHelperPreferredPort().then((port) => {
+      if (port && portInput && !portInput.value) portInput.value = String(port);
+    });
+  }
   if (titleEl) titleEl.textContent = t(reason === 'too_old' ? 'helperTooOldTitle' : 'helperOfflineTitle');
   if (bodyEl) {
     // 只讲"没连上"这一件事（原因由 title/body 区分：没运行 vs 版本过旧）。
@@ -225,20 +235,19 @@ async function retryHelperPort(): Promise<void> {
   const input = $opt('helperPortInput') as HTMLInputElement | null;
   const raw = (input?.value || '').trim();
   const msg = $opt('helperPortMsgEl');
-  const say = (text: string, ok: boolean) => {
+  const say = (text: string) => {
     if (!msg) return;
     msg.textContent = text;
-    msg.hidden = false;
-    msg.classList.toggle('helper-port-ok', ok);
+    msg.hidden = false;         // 样式见 .unsup-error（ui.css），别用不存在的类名
   };
   const port = Number(raw);
   if (!/^\d+$/.test(raw) || !Number.isInteger(port) || port < 1 || port > 65535) {
-    say(tSync(currentLang, 'helperPortInvalid'), false);
+    say(tSync(currentLang, 'helperPortInvalid'));
     return;
   }
   const found = await probeHelper({ ports: [port] });
   if (!found) {
-    say(tSync(currentLang, 'helperPortNotFound').split('{port}').join(String(port)), false);
+    say(tSync(currentLang, 'helperPortNotFound').split('{port}').join(String(port)));
     return;
   }
   await saveHelperPreferredPort(port);
@@ -2310,13 +2319,18 @@ onMessageFromHost((msg) => {
       // 只在日志区提醒一句（**不带**"错误："前缀，它不是错误），不置 Stopped、不弹模态。
       log(String(msg.message || ''));
       break;
-    case 'ERROR':
-      // 坑：errorPrefix 的 {m} 是占位符，须手动 replace（与 searchHits 同一套约定）
-      log(tSync(currentLang, 'errorPrefix').replace('{m}', String(msg.message)));
+    case 'ERROR': {
+      // 坑：errorPrefix 的 {m} 是占位符，须手动 replace（与 searchHits 同一套约定）。
+      // 又一类坑（复审抓到）：助手侧运行期错误在 helper.helperErrorMessage 里**已经**套过
+      // 一次 errorPrefix，这里再套一次就变成"错误：错误：…"。所以先看是否已带前缀。
+      const raw = String(msg.message ?? '');
+      const prefix = tSync(currentLang, 'errorPrefix').split('{m}')[0];
+      log(raw.startsWith(prefix) ? raw : tSync(currentLang, 'errorPrefix').replace('{m}', raw));
       // 麦克风启动失败升级为模态：授权框没出现就闪退时，这是用户唯一读得到原因的地方
       if (msg.micFailure) showMicErrorModal(String(msg.message || ''));
       setStatus('Stopped');
       break;
+    }
     case 'LOCK_CHANGED':
       locked = msg.locked;
       updateLockUI();
