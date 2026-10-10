@@ -236,7 +236,7 @@ const strings: Record<string, Record<string, string>> = {
     helperPairEmptyCode: '请先填入助手窗口里显示的 6 位配对码',
     helperPairErrGeneric: '配对失败：{m}',
     helperPairErrNetwork: '连不上桌面助手：请确认助手窗口已打开（窗口底部日志里有「正在监听」字样）。注意：助手处于「暂停」也可以配对，不必先点「启动」。',
-    helperNotFound: '没探测到桌面助手，无法配对。请确认助手窗口已打开（它的状态行会显示「已暂停（服务运行中…）· 端口 N」或「正在采集 · … · 端口 N」），再重新提交。如果你用过 --port（或助手跑在 8790–8810 之外），请先关掉本框、点「开始」——离线说明框里有一个「助手端口」输入，填上助手状态行里的端口即可。还没安装助手的话：同样关掉本框 → 再点一次「开始」，按说明框里的链接下载并启动。',
+    helperNotFound: '没探测到桌面助手，无法配对。请确认助手窗口已打开（它的状态行会显示「已暂停（服务运行中，连接不断）· 端口 N」或「正在采集 · … · 端口 N」），再重新提交。如果你用过 --port（或助手跑在 8790–8810 之外），请先关掉本框、点「开始」——离线说明框里有一个「助手端口」输入，填上助手状态行里的端口即可。还没安装助手的话：同样关掉本框 → 再点一次「开始」，按说明框里的链接下载并启动。',
     // 助手窗口的「启动/暂停」总开关默认是暂停：这不是故障，是等用户去按一下。
     // 点「启动」后 server 会直接向已连客户端广播真实 PCM（无需重试、无需重新点开始）
     helperPaused: '桌面助手窗口处于「暂停」：点窗口里的「启动」即可开始出声（无需其它操作；此前识别到的内容不受影响）',
@@ -519,7 +519,7 @@ const strings: Record<string, Record<string, string>> = {
     helperPairEmptyCode: 'Enter the 6-character pair code shown in the helper window first',
     helperPairErrGeneric: 'Pairing failed: {m}',
     helperPairErrNetwork: 'Cannot reach the desktop helper — make sure its window is open (the bottom log says "listening"). Note: the helper may be paused, you can still pair without pressing Start.',
-    helperNotFound: 'No desktop helper was detected, so pairing is not possible. Make sure its window is open (its status line shows "paused (service up...) - port N" or "capturing - ... - port N"), then submit the code again. If you started the helper with --port (or it runs outside 8790-8810), close this box and press Start: the offline dialog has a "helper port" field where you can type the port from the helper status line. Not installed yet? Close this box, press Start again and follow the download link in the dialog.',
+    helperNotFound: 'No desktop helper was detected, so pairing is not possible. Make sure its window is open (its status line shows "paused (service up, connection kept) · port N" or "capturing · ... · port N"), then submit the code again. If you started the helper with --port (or it runs outside 8790-8810), close this box and press Start: the offline dialog has a "helper port" field where you can type the port from the helper status line. Not installed yet? Close this box, press Start again and follow the download link in the dialog.',
     helperPaused: 'The desktop helper window is paused — press "Start" in its window to begin hearing audio (nothing else needed; what has been transcribed so far is unaffected)',
     helperWsClosed: 'Disconnected from the desktop helper — first check that its window is still running, then stop this session and press Start again to reconnect',
     helperNeverConnected: 'Could not connect to the desktop helper: this session was stopped (so you are not left looking at a session that is silently doing nothing). Make sure the helper is running and this browser is paired, then press Start again. One common cause is having too many EasySub pages open (the helper accepts 8) - close the extra ones and retry.',
