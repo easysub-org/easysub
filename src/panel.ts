@@ -21,7 +21,7 @@ import { initCompatCheck, openCompatCheck } from './compat';
 // 本机助手（桌面端）：探测 → 配对 → 从桌面端取 16k PCM。产品纪律见 src/helper.ts 文件头。
 import {
   HelperInfo, HelperSession, helperErrorMessage, loadHelperSession, pairHelper, probeHelper, saveHelperSession,
-  HELPER_RELEASES_URL,
+  HELPER_RELEASES_URL, saveHelperPreferredPort,
 } from './helper';
 import { evaluateHelperGate } from './helper-gate';
 
@@ -176,20 +176,31 @@ function hideHelperPairModal() {
 // （与之相对：助手在跑但处于「暂停」= 连着，只是没在采音频 —— 那种情况允许开始，静音帧照推。
 //  区别就在"有没有连上"，不是"有没有声音"。）
 const helperOfflineModal = $opt('helperOfflineModal') as HTMLDivElement | null;
-function showHelperOfflineModal() {
+function showHelperOfflineModal(reason: 'offline' | 'too_old' = 'offline') {
   if (!helperOfflineModal) return;
   const t = (k: string) => tSync(currentLang, k);
   const titleEl = $opt('helperOfflineTitleEl');
   const bodyEl = $opt('helperOfflineBodyEl');
   const linkEl = $opt('helperOfflineLinkEl');
   const okBtn = $opt('helperOfflineOk');
-  if (titleEl) titleEl.textContent = t('helperOfflineTitle');
+  const portRow = $opt('helperPortRow');
+  const portLabel = $opt('helperPortLabelEl');
+  const portRetry = $opt('helperPortRetry');
+  const portHint = $opt('helperPortHintEl');
+  const portMsg = $opt('helperPortMsgEl');
+  // 手动端口**只在"探不到"时**给：版本过旧是另一回事，填端口没用（反倒会让人以为要填端口）
+  if (portRow) portRow.hidden = reason !== 'offline';
+  if (portLabel) portLabel.textContent = t('helperPortLabel');
+  if (portRetry) portRetry.textContent = t('helperPortRetry');
+  if (portHint) portHint.textContent = t('helperPortHint');
+  if (portMsg) { portMsg.hidden = true; portMsg.textContent = ''; }
+  if (titleEl) titleEl.textContent = t(reason === 'too_old' ? 'helperTooOldTitle' : 'helperOfflineTitle');
   if (bodyEl) {
-    // 只讲"助手没在运行、去启动它"这一件事。
+    // 只讲"没连上"这一件事（原因由 title/body 区分：没运行 vs 版本过旧）。
     // 以前这里还会在非回环页面上追加"让助手放行这个站点（--allow-cors-all）"的指引 ——
     // 那条已经过时且会误导：助手**默认 CORS 全放行**（产品要求，不做手动设置），
     // 部署在任何域名的 Web 版开箱即用，没有"要用户自己去放行"这回事。
-    bodyEl.textContent = t('helperOfflineBody');
+    bodyEl.textContent = t(reason === 'too_old' ? 'helperTooOldBody' : 'helperOfflineBody');
   }
   if (linkEl) {
     linkEl.innerHTML = `${escapeHtml(t('helperReleases'))} <a href="${HELPER_RELEASES_URL}" target="_blank" rel="noopener noreferrer">${HELPER_RELEASES_URL}</a>`;
@@ -201,6 +212,41 @@ function hideHelperOfflineModal() {
   if (helperOfflineModal) helperOfflineModal.hidden = true;
 }
 $opt('helperOfflineOk')?.addEventListener('click', () => hideHelperOfflineModal());
+$opt('helperPortRetry')?.addEventListener('click', () => { void retryHelperPort(); });
+$opt('helperPortInput')?.addEventListener('keydown', (e) => {
+  if ((e as KeyboardEvent).key === 'Enter') void retryHelperPort();
+});
+
+/**
+ * 「用这个端口再试一次」——助手跑在 8790–8810 之外时，这是**页面内唯一的自救入口**
+ * （可用性审查 S1：以前页面只说"助手没在运行"，而助手窗口明明写着"正在监听 …:9000"）。
+ */
+async function retryHelperPort(): Promise<void> {
+  const input = $opt('helperPortInput') as HTMLInputElement | null;
+  const raw = (input?.value || '').trim();
+  const msg = $opt('helperPortMsgEl');
+  const say = (text: string, ok: boolean) => {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.hidden = false;
+    msg.classList.toggle('helper-port-ok', ok);
+  };
+  const port = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    say(tSync(currentLang, 'helperPortInvalid'), false);
+    return;
+  }
+  const found = await probeHelper({ ports: [port] });
+  if (!found) {
+    say(tSync(currentLang, 'helperPortNotFound').split('{port}').join(String(port)), false);
+    return;
+  }
+  await saveHelperPreferredPort(port);
+  log(tSync(currentLang, 'helperPortFound').split('{port}').join(String(port)));
+  hideHelperOfflineModal();
+  helperInfo = null;              // 让 doStart 用刚记住的端口重新探测
+  void doStart();
+}
 function showHelperPairError(text: string) {
   if (!helperPairErrEl) return;
   helperPairErrEl.textContent = text;
@@ -1301,13 +1347,15 @@ async function doStart(): Promise<void> {
     // 不是"有没有声音"。裁决抽成了纯函数 `evaluateHelperGate`（src/helper-gate.ts），
     // 规则原文与回归测试都在那里 —— 改门卫先改它、再跑 `npm test`。
     const action = evaluateHelperGate(helperInfo, !!helperSession);
-    if (action === 'offline') {
+    if (action === 'offline' || action === 'too_old') {
       // 助手没运行 / 没安装 / 探测不到：不启动，弹说明框 + 下载链接。这条音源完全依赖
       // 助手进程，没连上就点开始只会得到一场纯静音会话 —— 用户实测反馈的原话就是
       // "助手软件都没打开、根本没连接，点开始还能给我启动？"。
-      showHelperOfflineModal();
+      // too_old（协议对不上）必须与"没运行"分开说：老助手的窗口就摆在用户眼前，
+      // 说"没运行"是误导（可用性审查 S4）
+      showHelperOfflineModal(action);
       setStatus('Stopped');
-      log(tSync(currentLang, 'helperOfflineLog'));
+      log(tSync(currentLang, action === 'too_old' ? 'helperTooOldTitle' : 'helperOfflineLog'));
       return;
     }
     if (action === 'pair') {

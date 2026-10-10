@@ -765,3 +765,14 @@ body[data-mode="light"] .unsup-card { box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2)
   .container, .container > *, body.anim .container > * { opacity: 1; transform: none; }
   .btn:active, .icon-btn:active, .help-btn:active, .swatch:active, .seg:active, .bsg:active { transform: none; }
 }
+
+/* 手动端口一行（离线说明框里）：助手跑在探测范围之外时唯一能在页内自救的入口 */
+.helper-port-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 0;
+}
+.helper-port-row label { font-size: 12px; color: var(--text2); }
+.helper-port-row input { width: 78px; }
+.helper-port-hint { font-size: 11px; color: var(--text2); margin: 4px 0 0; }

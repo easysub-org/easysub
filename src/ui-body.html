@@ -517,6 +517,16 @@
       </div>
       <p class="unsup-body" id="helperOfflineBodyEl"></p>
       <p class="unsup-body" id="helperOfflineLinkEl"></p>
+      <!-- 手动端口：助手跑在 8790–8810 之外时，页面永远探不到它，而提示只会说"助手没在运行"。
+           这是那个失败态**在页内唯一的出路**（可用性审查 S1） -->
+      <div class="helper-port-row" id="helperPortRow">
+        <label for="helperPortInput" id="helperPortLabelEl"></label>
+        <input type="text" id="helperPortInput" class="helper-pair-input" inputmode="numeric"
+               autocomplete="off" spellcheck="false" maxlength="5">
+        <button type="button" class="unsup-btn" id="helperPortRetry"></button>
+      </div>
+      <p class="unsup-body helper-port-hint" id="helperPortHintEl"></p>
+      <p class="unsup-body unsup-error" id="helperPortMsgEl" hidden></p>
       <div class="unsup-actions">
         <button type="button" class="unsup-btn primary" id="helperOfflineOk"></button>
       </div>

@@ -41,12 +41,18 @@ export const HELPER_SAMPLE_RATE = 16000;
 export const HELPER_RELEASES_URL = 'https://github.com/easysub-org/easysub-helper/releases';
 
 const SESSION_KEY = 'helperSession';
+//: 用户在离线框里手动填过的端口（助手跑在 8790–8810 之外时的唯一出路）
+const PREFERRED_PORT_KEY = 'helperPreferredPort';
 const PROBE_TIMEOUT_MS = 700;
 const PAIR_TIMEOUT_MS = 4000;
 
 export interface HelperInfo {
   port: number;
   version: string;
+  /** 助手的协议版本（/api/pair/info 的 api 字段）。老版本助手没有这个字段 → undefined */
+  api?: number;
+  /** 助手是否需要配对（--token 调试模式会回 false）。老版本助手没有这个字段 */
+  pairingRequired?: boolean;
   paired: boolean;
   /**
    * 第二步（带 `?token=` 的复探）**是否真的拿到过答案**。
@@ -197,6 +203,8 @@ async function probePort(port: number, token?: string): Promise<HelperInfo | nul
     port,
     version: String(data.version || ''),
     paired: data.paired === true,
+    api: typeof data.api === 'number' ? data.api : undefined,
+    pairingRequired: typeof data.pairingRequired === 'boolean' ? data.pairingRequired : undefined,
     tokenChecked,
     paused: data.paused === true,
     lang: String(data.lang || ''),
@@ -204,8 +212,13 @@ async function probePort(port: number, token?: string): Promise<HelperInfo | nul
   };
 }
 
-export async function probeHelper(opts: { full?: boolean; token?: string } = {}): Promise<HelperInfo | null> {
-  const ports = helperPorts(await storedPort(), opts.full === true);
+export async function probeHelper(
+  opts: { full?: boolean; token?: string; ports?: number[] } = {},
+): Promise<HelperInfo | null> {
+  // 指定端口优先：面板里"手动填端口"那条路要能直接探用户输入的那一个
+  const ports = opts.ports && opts.ports.length
+    ? opts.ports
+    : helperPorts((await storedPort()) ?? (await storedPreferredPort()), opts.full === true);
   // 带令牌探测是**必须**的：助手侧 `paired` 的语义是"本次请求带的令牌是否有效"
   // （server.py handle_pair_info + _token_from_request），不带令牌恒为 false —— 那样每次打开
   // 面板都会被当成"没配对过"，逼用户重输配对码，"只配一次"的承诺直接失效。
@@ -215,6 +228,34 @@ export async function probeHelper(opts: { full?: boolean; token?: string } = {})
   // 优先"已配对"的那一个（多开助手/换端口时更符合用户预期）
   found.sort((a, b) => Number(b.paired) - Number(a.paired));
   return found[0];
+}
+
+/** 记住用户手动指定的端口：下次探测（含 quick 探测）会优先打它。 */
+export async function saveHelperPreferredPort(port: number): Promise<void> {
+  try {
+    await storage.set({ [PREFERRED_PORT_KEY]: port });
+  } catch { /* 存不下也不致命：本次仍会用显式端口探测 */ }
+}
+
+async function storedPreferredPort(): Promise<number | undefined> {
+  try {
+    const r = await storage.get(PREFERRED_PORT_KEY);
+    const value = r?.[PREFERRED_PORT_KEY];
+    return typeof value === 'number' && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 给助手的错误消息补一句"接下来做什么"（两端共用，避免两边各写一份）。
+ *
+ * 坑（可用性审查 S12）：采集中途失败时，页面只说"错误：采集中断…"，用户不知道还要回
+ * 助手窗口点一次「启动」——他再点「开始」只会撞到 ERR_PAUSED，等于同一次故障要兜两圈。
+ */
+export function appendHelperErrorHint(message: string, code: string | undefined, lang: string): string {
+  if (code !== 'capture_failed') return message;
+  return message + ' ' + tSync(lang, 'helperCaptureFailedHint');
 }
 
 export async function loadHelperSession(): Promise<HelperSession | null> {

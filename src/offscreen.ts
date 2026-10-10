@@ -15,7 +15,7 @@
 // 误判为"标签页已关闭"而整个清理掉（画面无字幕、麦克风灯灭，且没有任何提示）。
 // 所以：引擎建一次，sink 通过可变引用取"当前端口"。
 import { AsrEngine } from './asr-engine';
-import { HelperSource, isHelperSilentCode } from './helper';
+import { appendHelperErrorHint, HelperSource, isHelperSilentCode } from './helper';
 import { tSync } from './i18n';
 
 let port: chrome.runtime.Port;
@@ -241,6 +241,8 @@ function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
         toPanel({ type: 'HELPER_SILENT', message });
         return;
       }
+      // 真故障：补一句"接下来做什么"（两端共用，见 helper.appendHelperErrorHint）
+      message = appendHelperErrorHint(message, code, helperLang);
       toPanel({ type: 'ERROR', message });
     },
     log: (message) => engine.log(message),

@@ -19,7 +19,7 @@
 //   少任何一条都会表现成"看起来一样、用起来不一样"（用户已验证过的那些 bug）。
 import { AsrEngine } from '../asr-engine';
 import { MicCapture, micErrorText } from '../mic-capture';
-import { HelperSource, isHelperSilentCode, loadHelperSession } from '../helper';
+import { appendHelperErrorHint, HelperSource, isHelperSilentCode, loadHelperSession } from '../helper';
 import { emitToPanel, onHostMessage, resolveUrl, storage } from '../platform';
 import { tSync } from '../i18n';
 import { appendTranscript, attachTranscriptTranslation } from '../transcript-store';
@@ -174,6 +174,7 @@ async function startHelperSource(isStale: () => boolean) {
         emitToPanel({ type: 'HELPER_SILENT', message });
         return;
       }
+      message = appendHelperErrorHint(message, code, msgLang);
       emitToPanel({ type: 'ERROR', message });
       stopSession();
     },
