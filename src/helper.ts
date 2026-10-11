@@ -366,7 +366,7 @@ export class HelperSource {
   private sampleRate = HELPER_SAMPLE_RATE;
 
   constructor(opts: HelperSourceOptions) {
-    this.opts = { source: 'system', ...opts };
+    this.opts = { ...opts };
   }
 
   start(): void {
@@ -390,7 +390,10 @@ export class HelperSource {
       this.opened = true;
       this.log('已连接，请求开始采集');
       try {
-        ws.send(JSON.stringify({ type: 'start', source: this.opts.source || 'system' }));
+        // 坑（独立审查 ③）：以前恒发 source:'system' —— 助手侧"消息里的 source 优先"，于是
+        // `easysub-helper --no-gui --source mic` 实际采的却是系统音频（横幅还写着"麦克风"）。
+        // 音源交给助手自己的 default_source/_capture_source 决定，页面不替用户做选择。
+        ws.send(JSON.stringify({ type: 'start' }));
       } catch { /* 刚打开就断开：下面的 onclose 会报错 */ }
     };
     ws.onmessage = (ev) => this.handleMessage(ev);

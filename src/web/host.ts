@@ -129,18 +129,6 @@ function getEngine(): AsrEngine {
 // 幂等——ERROR / 浮窗关闭 / 用户点停止 三条路都会走到这里。
 // 导出给面板用：浮窗失联（被导航走/被浏览器丢弃）时面板也要能收敛整场会话。
 
-// 本页是不是"回环地址上的页面"——判定必须与助手那边的白名单**逐字对齐**（助手用
-// `security.is_loopback_origin`：`localhost` / `localhost.localdomain` 两个字面量，或
-// Python `ipaddress.ip_address(host).is_loopback`，即 IPv4 只有 127.0.0.0/8、IPv6 只有 ::1）。
-// 坑（独立审查抓的）：写宽了比写窄了更糟 —— 把 `0.0.0.0` / `127.1` / `localhost.` / `*.localhost`
-// 也当回环时，助手其实**会拒绝**它们，而这里却因此不给"站点没被放行"的指引，用户只剩静音。
-function isLoopbackPage(): boolean {
-  const host = location.hostname.toLowerCase();
-  if (host === 'localhost' || host === 'localhost.localdomain') return true;
-  if (host === '::1' || host === '[::1]') return true;      // 浏览器给的是带方括号的形式
-  const v4 = host.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  return !!v4 && v4.slice(1).every((part) => Number(part) <= 255);
-}
 
 // 桌面助手音频源：WS 由本宿主持有（面板页就是引擎宿主），PCM 直接喂进识别管道。
 // 令牌从 storage 读——面板配对成功后会写进去，这里不重复探测（避免两处状态不一致）。
@@ -162,7 +150,6 @@ async function startHelperSource(isStale: () => boolean) {
   helper = new HelperSource({
     port: session.port,
     token: session.token,
-    source: 'system',
     lang: msgLang,
     // 与扩展端同一条通道：PCM 交给引擎，电平由引擎自己算（不给 helper 开专属通路）
     onPcm: (f32, rate) => getEngine().feedMicChunk(f32, rate),

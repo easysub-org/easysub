@@ -336,7 +336,11 @@ chrome.runtime.onConnect.addListener((port) => {
             }
             captureTabId = reviveTabId;
             const id = captureTabId!;
-            sendToTab(id, { type: 'OVERLAY_TOGGLE', visible: true });
+            // 同导航：复活字幕层也要尊重 overlayVisible（独立审查 m3）
+            chrome.storage.local.get('tmspeech_prefs').then(r => {
+              const prefs = (r['tmspeech_prefs'] as any) || {};
+              sendToTab(id, { type: 'OVERLAY_TOGGLE', visible: prefs.overlayVisible !== false });
+            });
             // 坑：同 START——复活路径也必须把权威锁态推给（可能新建的）字幕层，
             // 否则重连自愈后新层按未锁定样式绘制且无人纠正。
             chrome.storage.local.get(LOCK_KEY).then(r => {
@@ -600,7 +604,14 @@ async function startRecognition(msg: any, respond: () => void) {
     // 用户确认：音源为系统/麦克风 → 自动开悬浮字幕窗（无标签页可注入，悬浮窗是唯一显示端）；
     // 音源为标签页 → 关闭悬浮窗，字幕回到浏览器内叠层。失败仅记日志，不阻断识别启动。
     if (source !== 'tab') {
-      openFloating().catch((e) => console.log('[TM BG] 自动打开悬浮字幕窗失败:', e));
+      // 坑（独立审查 M1）：以前对非 tab 音源**无条件**开浮窗 —— 用户在面板里取消勾选
+      // 「显示字幕」后，下次开始照样弹出来（偏好只在 tab 分支被消费），而那个勾选框在
+      // 非 tab 音源下又什么都不做。现在按 msg.overlayVisible 决定（默认开：!== false）。
+      if (msg.overlayVisible !== false) {
+        openFloating().catch((e) => console.log('[TM BG] 自动打开悬浮字幕窗失败:', e));
+      } else if (source === 'mic') {
+        closeFloating();
+      }
       // mic：悬浮窗已在（二次启动复用旧窗，不会有新的 onConnect）→ 直接下采集令；
       // 新开窗口则等 onConnect 补发。floating 侧对重复指令幂等，双发无害。
       if (source === 'mic' && floatingPort) sendToFloating({ type: 'MIC_CAPTURE_START' });
@@ -778,7 +789,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'OVERLAY_TOGGLE') {
-    if (captureTabId) sendToTab(captureTabId, { type: 'OVERLAY_TOGGLE', visible: msg.visible });
+    if (captureTabId) {
+      sendToTab(captureTabId, { type: 'OVERLAY_TOGGLE', visible: msg.visible });
+    } else {
+      // 非 tab 音源（系统音频/麦克风/桌面助手）没有可注入的叠层，唯一显示端就是悬浮窗：
+      // 这个勾选框必须真的能开关它，否则就是"点了没反应"（独立审查 M1）。
+      if (msg.visible) openFloating().catch((e) => console.log('[TM BG] 打开悬浮字幕窗失败:', e));
+      else closeFloating();
+    }
   }
 
   if (msg.type === 'LOCK_TOGGLE') {
@@ -905,9 +923,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (!already) {
       await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
     }
-    sendToTab(tabId, { type: 'OVERLAY_TOGGLE', visible: true });
+    // 坑（独立审查 m3）：以前无条件 visible:true —— 用户"隐藏字幕"的选择会在页面导航后
+    // 被静默撤销，而 storage 里的 overlayVisible 仍是 false（勾选态与实际显示分叉）。
     chrome.storage.local.get('tmspeech_prefs').then(r => {
       const prefs = (r['tmspeech_prefs'] as any) || {};
+      sendToTab(tabId, { type: 'OVERLAY_TOGGLE', visible: prefs.overlayVisible !== false });
       if (prefs.fontSize) sendToTab(tabId, { type: 'SET_FONT_SIZE', fontSize: prefs.fontSize });
     });
     if (offscreenPort) offscreenPort.postMessage({ type: 'RESEND_CURRENT_TEXT' });

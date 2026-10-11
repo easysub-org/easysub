@@ -223,7 +223,6 @@ function startHelperSource(portRaw: any, tokenRaw: any, langRaw?: any) {
   helperSource = new HelperSource({
     port,
     token,
-    source: 'system',
     // PCM 与其它音源走**同一条**注入通道（feedMicChunk → recordLevel → LEVEL），
     // 所以这里不需要任何 helper 专属的电平/波形处理——引擎自己会算。
     onPcm: (f32, rate) => engine.feedMicChunk(f32, rate),

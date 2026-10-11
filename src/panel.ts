@@ -1373,6 +1373,12 @@ async function doStart(): Promise<void> {
     // 「暂停」）。用缓存的 helperInfo 判断会形成死循环 —— 提示"请在助手窗口点启动"，用户去点了、
     // 回来再点「开始」，仍然读到旧的 paused=true。Web 版页面常驻，必然复现。
     await detectHelper(true);
+    // 坑（独立审查 m6）：探测有代次守卫 —— 若这次探测被"更新的那次探测"取代，它会直接
+    // return 且**不回写 helperInfo**，于是明明助手在运行也会弹「没探测到助手」。
+    // 这里再给一次机会，仍为空才报错。
+    if (!helperInfo) {
+      await detectHelper(true);
+    }
     // 产品决定（2026-10-05，**用户澄清后修正**）：能不能开始，看的是"**有没有连上助手**"，
     // 不是"有没有声音"。裁决抽成了纯函数 `evaluateHelperGate`（src/helper-gate.ts），
     // 规则原文与回归测试都在那里 —— 改门卫先改它、再跑 `npm test`。
@@ -1875,9 +1881,6 @@ async function loadTranscript() {
   renderTranscript();
 }
 
-function saveTranscript() {
-  storage.set({ [TRANSCRIPT_KEY]: transcriptEntries });
-}
 
 function renderTranscript() {
   if (transcriptEntries.length === 0) {
@@ -2386,7 +2389,21 @@ storage.get('tmspeech_use_punct').then(r => {
 // **音源常驻显示**，探测结果只决定"能不能启动"和提示语（早期"探测到才显示"已废弃，
 // 用户实测在 Web 版里因此找不到这个音源 —— 见 detectHelper 上方注释）。
 void detectHelper();
-sendToHost({ type: 'GET_STATUS' }).then((resp: any) => {
+// 坑（独立审查 M2）：这是模块体顶层，Web 版里它跑在 installWebHost() **之前** —— dispatch
+// 当时没有监听者，promise resolve 成 undefined，locked 于是永远停在 false（面板写"锁定"、
+// 字幕其实已锁，要点两下才能解锁）。所以拿不到响应就重试几次（扩展侧一次就成功，无副作用）。
+function requestStatus(attempt = 0): void {
+  void sendToHost({ type: 'GET_STATUS' }).then((resp: any) => {
+    if (!resp && attempt < 8) {
+      setTimeout(() => requestStatus(attempt + 1), 50);
+      return;
+    }
+    applyStatus(resp);
+  }).catch(() => {});          // 宿主不可用/异常：保持默认状态，别抛未处理 rejection
+}
+requestStatus();
+
+function applyStatus(resp: any): void {
   // 坑：status 缺失（响应异常）时不得调 setStatus——undefined 会落进 else 分支误显 Stopped
   if (resp?.status) setStatus(resp.status, resp.startedAt);
   if (resp?.locked !== undefined) { locked = resp.locked; updateLockUI(); }
@@ -2396,4 +2413,4 @@ sendToHost({ type: 'GET_STATUS' }).then((resp: any) => {
     levels = resp.levels.slice(-LEVEL_BARS);
     if (chkWaveform.checked && lastStatus === 'Running') drawWave();
   }
-}).catch(() => {});
+}
