@@ -11,7 +11,7 @@ jobs:
     # 只要看到 /oc，且是你本人，就立刻干活
     if: |
       contains(github.event.comment.body, '/oc') &&
-      (github.event.comment.author_association == 'OWNER')
+      (github.event.comment.author_association == 'MEMBER')
     runs-on: ubuntu-latest
     permissions:
       id-token: write
