@@ -14,6 +14,8 @@
  *     → **活着但暂停可以开始**：探测到 + 有会话 → 'start'（此刻收静音帧，识别照常；
  *       用户在助手窗口点「启动」后 server 直接续推真实 PCM，无需重开）。
  *   探测到但还没配对 → 'pair'（弹配对框；「取消」= 放弃这次启动）。
+ *   探测到但**协议版本太旧**（没有 api 字段 / 低于最低版本）→ 'too_old'：
+ *     说清"该更新助手"，而不是让他去找一个"没运行"的问题（可用性审查 S4）。
  *
  * 分界线 =「有没有连上（探测到）」，不是「有没有声音」。
  */
@@ -22,10 +24,15 @@
 export interface HelperGateProbe {
   /** 探测时带的令牌是否被助手认可（与"这个浏览器配过没有"同义） */
   paired: boolean;
+  /** 助手的协议版本；老版本助手没有这个字段 → undefined */
+  api?: number;
 }
 
-/** 门卫的裁决：offline=弹"助手没在运行"说明框；pair=弹配对框；start=放行 */
-export type HelperGateAction = 'offline' | 'pair' | 'start';
+/** 门卫的裁决：offline=说明框；too_old=引导更新；pair=配对框；start=放行 */
+export type HelperGateAction = 'offline' | 'too_old' | 'pair' | 'start';
+
+/** 最低可用的助手协议版本（protocol.API_VERSION=1）。比它低/缺字段都算"该更新了" */
+export const HELPER_MIN_API = 1;
 
 /**
  * @param probe 探测结果；**null = 没探测到助手**（没运行/没安装/端口不在范围）
@@ -36,6 +43,7 @@ export function evaluateHelperGate(
   hasSession: boolean,
 ): HelperGateAction {
   if (!probe) return 'offline';
+  if (!probe.api || probe.api < HELPER_MIN_API) return 'too_old';
   if (!hasSession) return 'pair';
   return 'start';
 }

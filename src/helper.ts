@@ -28,25 +28,35 @@ import { storage } from './platform';
 // 坑：i18n 的 getLang() 是异步的，而 WS 的错误回调是同步路径——所以语言由宿主显式传进来
 // （面板有 currentLang，offscreen 有 INIT 带来的 lang），这里绝不自己去 await。
 import { tSync } from './i18n';
+// 端口规划的纯函数单独成文件（能写单测）；这里转出，保持既有 import 路径不变
+import {
+  HELPER_DEFAULT_PORT, HELPER_PORT_MAX, HELPER_PORT_MIN, HELPER_PORT_SCAN,
+  HELPER_PROBE_QUICK_PORTS, helperPorts, probePortsFor,
+} from './helper-ports';
 
-// 与 easysub-helper 的 config.PORT_SCAN_RANGE 对齐：默认端口被占时助手会自动顺延
-export const HELPER_DEFAULT_PORT = 8790;
-export const HELPER_PORT_SCAN = 20;
-//: 面板打开时只探前几个端口：助手默认就在 8790，不必为"漂移"在控制台刷 20 条失败请求
-//: （用户实测吐槽过）。完整扫描留给"用户主动选了这个音源 / 点了开始"的时刻。
-export const HELPER_PROBE_QUICK_PORTS = 2;
+export {
+  HELPER_DEFAULT_PORT, HELPER_PORT_MAX, HELPER_PORT_MIN, HELPER_PORT_SCAN,
+  HELPER_PROBE_QUICK_PORTS, helperPorts, probePortsFor,
+};
+
 export const HELPER_SAMPLE_RATE = 16000;
 //: 助手仓库的 Releases 页：面板切到「桌面助手」音源时会把地址附在提示里
 //: （还没装助手 / 想更新的人可以直接点过去）。助手是独立仓库。
 export const HELPER_RELEASES_URL = 'https://github.com/easysub-org/easysub-helper/releases';
 
 const SESSION_KEY = 'helperSession';
+//: 用户在离线框里手动填过的端口（助手跑在 8790–8810 之外时的唯一出路）
+const PREFERRED_PORT_KEY = 'helperPreferredPort';
 const PROBE_TIMEOUT_MS = 700;
 const PAIR_TIMEOUT_MS = 4000;
 
 export interface HelperInfo {
   port: number;
   version: string;
+  /** 助手的协议版本（/api/pair/info 的 api 字段）。老版本助手没有这个字段 → undefined */
+  api?: number;
+  /** 助手是否需要配对（--token 调试模式会回 false）。老版本助手没有这个字段 */
+  pairingRequired?: boolean;
   paired: boolean;
   /**
    * 第二步（带 `?token=` 的复探）**是否真的拿到过答案**。
@@ -79,21 +89,6 @@ export interface PairSuccess {
   ok: true;
   token: string;
   label: string;
-}
-
-/**
- * 要探测的端口列表。`full=false`（默认）只扫开头几个，`full=true` 扫满 20 个（+ 记住的端口）。
- *
- * 坑：默认值必须与这里的文档一致（独立审查抓到签名写着 `full = true` 而文档说"默认 false"）。
- * 默认取 false 是有意的——裸调一次 `helperPorts()` 不该在本机刷出 21 条失败请求。
- * 两个调用方（面板 detectHelper 与 probeHelper）都**显式**传这个参数，所以改动不影响它们。
- */
-export function helperPorts(preferred?: number, full = false): number[] {
-  const out: number[] = [];
-  if (preferred) out.push(preferred);
-  const last = full ? HELPER_PORT_SCAN : HELPER_PROBE_QUICK_PORTS;
-  for (let i = 0; i <= last; i++) out.push(HELPER_DEFAULT_PORT + i);
-  return out.filter((p, idx) => out.indexOf(p) === idx);
 }
 
 export function helperBaseUrl(port: number): string {
@@ -197,6 +192,8 @@ async function probePort(port: number, token?: string): Promise<HelperInfo | nul
     port,
     version: String(data.version || ''),
     paired: data.paired === true,
+    api: typeof data.api === 'number' ? data.api : undefined,
+    pairingRequired: typeof data.pairingRequired === 'boolean' ? data.pairingRequired : undefined,
     tokenChecked,
     paused: data.paused === true,
     lang: String(data.lang || ''),
@@ -204,8 +201,21 @@ async function probePort(port: number, token?: string): Promise<HelperInfo | nul
   };
 }
 
-export async function probeHelper(opts: { full?: boolean; token?: string } = {}): Promise<HelperInfo | null> {
-  const ports = helperPorts(await storedPort(), opts.full === true);
+export async function probeHelper(
+  opts: { full?: boolean; token?: string; ports?: number[] } = {},
+): Promise<HelperInfo | null> {
+  // 指定端口优先：面板里"手动填端口"那条路要能直接探用户输入的那一个
+  // 坑（复审抓到的**无限循环**）：这里以前是 `(await storedPort()) ?? (await storedPreferredPort())`
+  // —— 已配对用户的 storage 里必然有旧会话端口，`??` 于是把用户**手填的端口整个吃掉**：
+  // 填 9000 → 探到 → 存下 → 重新开始 → 又只探 8790–8810 → 同一个离线框弹回来，页内没有出路。
+  // 现在交给 probePortsFor（纯函数、**有单测护着调用点**）：手填的排前面，会话端口也保留。
+  let ports = opts.ports;
+  if (!ports || !ports.length) {
+    const [sessionPort, preferredPort] = await Promise.all([storedPort(), storedPreferredPort()]);
+    // 内存兜底：写 storage 失败时（隐私模式/配额），手填的端口至少本次会话内还算数，
+    // 否则"存不下 → 下次不探 → 同一个框弹回来"的循环会以更隐蔽的方式复活（复审 minor-5）。
+    ports = probePortsFor(sessionPort, preferredPort ?? memoryPreferredPort, opts.full === true);
+  }
   // 带令牌探测是**必须**的：助手侧 `paired` 的语义是"本次请求带的令牌是否有效"
   // （server.py handle_pair_info + _token_from_request），不带令牌恒为 false —— 那样每次打开
   // 面板都会被当成"没配对过"，逼用户重输配对码，"只配一次"的承诺直接失效。
@@ -215,6 +225,43 @@ export async function probeHelper(opts: { full?: boolean; token?: string } = {})
   // 优先"已配对"的那一个（多开助手/换端口时更符合用户预期）
   found.sort((a, b) => Number(b.paired) - Number(a.paired));
   return found[0];
+}
+
+/** 记住用户手动指定的端口：下次探测（含 quick 探测）会优先打它。 */
+export async function saveHelperPreferredPort(port: number): Promise<void> {
+  memoryPreferredPort = port;                    // 见 probeHelper 里的"内存兜底"
+  try {
+    await storage.set({ [PREFERRED_PORT_KEY]: port });
+  } catch { /* 存不下也不致命：内存里还留着，本次会话内仍然会探它 */ }
+}
+
+//: 手填端口的内存副本（storage 写失败时的兜底，见 probeHelper）
+let memoryPreferredPort: number | undefined;
+
+/** 读回用户手填并成功探到过的端口（离线框用它预填输入框）。 */
+export async function loadHelperPreferredPort(): Promise<number | undefined> {
+  return storedPreferredPort();
+}
+
+async function storedPreferredPort(): Promise<number | undefined> {
+  try {
+    const r = await storage.get(PREFERRED_PORT_KEY);
+    const value = r?.[PREFERRED_PORT_KEY];
+    return typeof value === 'number' && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 给助手的错误消息补一句"接下来做什么"（两端共用，避免两边各写一份）。
+ *
+ * 坑（可用性审查 S12）：采集中途失败时，页面只说"错误：采集中断…"，用户不知道还要回
+ * 助手窗口点一次「启动」——他再点「开始」只会撞到 ERR_PAUSED，等于同一次故障要兜两圈。
+ */
+export function appendHelperErrorHint(message: string, code: string | undefined, lang: string): string {
+  if (code !== 'capture_failed') return message;
+  return message + ' ' + tSync(lang, 'helperCaptureFailedHint');
 }
 
 export async function loadHelperSession(): Promise<HelperSession | null> {

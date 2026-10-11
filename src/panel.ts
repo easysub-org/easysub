@@ -21,7 +21,7 @@ import { initCompatCheck, openCompatCheck } from './compat';
 // 本机助手（桌面端）：探测 → 配对 → 从桌面端取 16k PCM。产品纪律见 src/helper.ts 文件头。
 import {
   HelperInfo, HelperSession, helperErrorMessage, loadHelperSession, pairHelper, probeHelper, saveHelperSession,
-  HELPER_RELEASES_URL,
+  HELPER_RELEASES_URL, loadHelperPreferredPort, saveHelperPreferredPort,
 } from './helper';
 import { evaluateHelperGate } from './helper-gate';
 
@@ -176,31 +176,60 @@ function hideHelperPairModal() {
 // （与之相对：助手在跑但处于「暂停」= 连着，只是没在采音频 —— 那种情况允许开始，静音帧照推。
 //  区别就在"有没有连上"，不是"有没有声音"。）
 const helperOfflineModal = $opt('helperOfflineModal') as HTMLDivElement | null;
-function showHelperOfflineModal() {
+/**
+ * 给消息套一次「错误：」前缀，但**已经套过就不再套**。
+ *
+ * 两个坑（复审指出）：
+ *  1. 助手运行期错误在宿主里是用**会话语言**预先套好前缀的（offscreen/host 的 helperLang/msgLang），
+ *     而这里只有 currentLang —— 会话中途切语言就会变成「错误：Error: …」。所以判断要**语言无关**：
+ *     把两种语言的前缀都试一遍。
+ *  2. 万一某语言的模板不含 `{m}`，`split('{m}')[0]` 会等于整串 → 判断落空 → replace 空操作 →
+ *     整条消息被丢掉。所以模板里没有 `{m}` 时退回"前缀 + 原文"。
+ */
+function withErrorPrefix(raw: string): string {
+  const heads = ['zh_CN', 'en']
+    .map((lang) => tSync(lang, 'errorPrefix').split('{m}')[0])
+    .filter((head) => head.length > 0 && head !== 'errorPrefix');
+  if (heads.some((head) => raw.startsWith(head))) return raw;
+  const template = tSync(currentLang, 'errorPrefix');
+  return template.includes('{m}') ? template.replace('{m}', raw) : template + raw;
+}
+
+function showHelperOfflineModal(reason: 'offline' | 'too_old' = 'offline') {
   if (!helperOfflineModal) return;
   const t = (k: string) => tSync(currentLang, k);
   const titleEl = $opt('helperOfflineTitleEl');
   const bodyEl = $opt('helperOfflineBodyEl');
   const linkEl = $opt('helperOfflineLinkEl');
   const okBtn = $opt('helperOfflineOk');
-  if (titleEl) titleEl.textContent = t('helperOfflineTitle');
+  const portRow = $opt('helperPortRow');
+  const portLabel = $opt('helperPortLabelEl');
+  const portRetry = $opt('helperPortRetry');
+  const portHint = $opt('helperPortHintEl');
+  const portInput = $opt('helperPortInput') as HTMLInputElement | null;
+  const portMsg = $opt('helperPortMsgEl');
+  // 手动端口**只在"探不到"时**给：版本过旧是另一回事，填端口没用（反倒会让人以为要填端口）
+  // 端口行与它的说明是**两个**节点，必须一起藏：只藏输入框会留下一句"填端口"，
+  // 正好把用户引向一个不存在的控件（复审指出）。
+  if (portRow) portRow.hidden = reason !== 'offline';
+  if (portHint) portHint.hidden = reason !== 'offline';
+  if (portLabel) portLabel.textContent = t('helperPortLabel');
+  if (portRetry) portRetry.textContent = t('helperPortRetry');
+  if (portHint) portHint.textContent = t('helperPortHint');
+  if (portMsg) { portMsg.hidden = true; portMsg.textContent = ''; }
+  if (portInput && reason === 'offline') {
+    // 预填上次成功用过的端口：失败一次就得重敲是很烦的（复审指出）
+    void loadHelperPreferredPort().then((port) => {
+      if (port && portInput && !portInput.value) portInput.value = String(port);
+    });
+  }
+  if (titleEl) titleEl.textContent = t(reason === 'too_old' ? 'helperTooOldTitle' : 'helperOfflineTitle');
   if (bodyEl) {
-    // 非扩展（Web 版）部署在别的域名时，连不上多半是助手没放行这个站点 —— 把那句指引也带上，
-    // 否则用户只会看到"助手没运行"，而助手明明开着（CORS 被浏览器拦掉了）。
-    let body = t('helperOfflineBody');
-    if (!IS_EXTENSION) {
-      try {
-        const host = location.hostname.toLowerCase();
-        const loopback = host === 'localhost' || host === 'localhost.localdomain'
-          || host === '::1' || host === '[::1]' || /^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host);
-        if (!loopback) {
-          const origin = location.origin && location.origin !== 'null'
-            ? location.origin : location.protocol + '//';
-          body += ' ' + t('helperCorsOriginHint').split('{origin}').join(origin);
-        }
-      } catch { /* location 不可用：只显示通用说明 */ }
-    }
-    bodyEl.textContent = body;
+    // 只讲"没连上"这一件事（原因由 title/body 区分：没运行 vs 版本过旧）。
+    // 以前这里还会在非回环页面上追加"让助手放行这个站点（--allow-cors-all）"的指引 ——
+    // 那条已经过时且会误导：助手**默认 CORS 全放行**（产品要求，不做手动设置），
+    // 部署在任何域名的 Web 版开箱即用，没有"要用户自己去放行"这回事。
+    bodyEl.textContent = t(reason === 'too_old' ? 'helperTooOldBody' : 'helperOfflineBody');
   }
   if (linkEl) {
     linkEl.innerHTML = `${escapeHtml(t('helperReleases'))} <a href="${HELPER_RELEASES_URL}" target="_blank" rel="noopener noreferrer">${HELPER_RELEASES_URL}</a>`;
@@ -212,6 +241,42 @@ function hideHelperOfflineModal() {
   if (helperOfflineModal) helperOfflineModal.hidden = true;
 }
 $opt('helperOfflineOk')?.addEventListener('click', () => hideHelperOfflineModal());
+$opt('helperPortRetry')?.addEventListener('click', () => { void retryHelperPort(); });
+$opt('helperPortInput')?.addEventListener('keydown', (e) => {
+  if ((e as KeyboardEvent).key === 'Enter') void retryHelperPort();
+});
+
+/**
+ * 「用这个端口再试一次」——助手跑在 8790–8810 之外时，这是**页面内唯一的自救入口**
+ * （可用性审查 S1：以前页面只说"助手没在运行"，而助手窗口明明写着"正在监听 …:9000"）。
+ */
+async function retryHelperPort(): Promise<void> {
+  const input = $opt('helperPortInput') as HTMLInputElement | null;
+  const raw = (input?.value || '').trim();
+  const msg = $opt('helperPortMsgEl');
+  const say = (text: string) => {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.hidden = false;         // 样式见 .unsup-error（ui.css），别用不存在的类名
+  };
+  const port = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isInteger(port) || port < 1 || port > 65535) {
+    say(tSync(currentLang, 'helperPortInvalid'));
+    return;
+  }
+  const found = await probeHelper({ ports: [port] });
+  if (!found) {
+    say(tSync(currentLang, 'helperPortNotFound').split('{port}').join(String(port)));
+    return;
+  }
+  await saveHelperPreferredPort(port);
+  const foundMsg = tSync(currentLang, 'helperPortFound').split('{port}').join(String(port));
+  hideHelperOfflineModal();
+  helperInfo = null;              // 让 doStart 用刚记住的端口重新探测
+  // 关键：这条成功文案要**在 doStart 之后**写 —— doStart 里的 setHeroLoading 会用
+  // "正在加载模型…"覆盖状态行，先写就等于用户根本看不到（复审 minor-2）。
+  void doStart().then(() => log(foundMsg));
+}
 function showHelperPairError(text: string) {
   if (!helperPairErrEl) return;
   helperPairErrEl.textContent = text;
@@ -1312,13 +1377,15 @@ async function doStart(): Promise<void> {
     // 不是"有没有声音"。裁决抽成了纯函数 `evaluateHelperGate`（src/helper-gate.ts），
     // 规则原文与回归测试都在那里 —— 改门卫先改它、再跑 `npm test`。
     const action = evaluateHelperGate(helperInfo, !!helperSession);
-    if (action === 'offline') {
+    if (action === 'offline' || action === 'too_old') {
       // 助手没运行 / 没安装 / 探测不到：不启动，弹说明框 + 下载链接。这条音源完全依赖
       // 助手进程，没连上就点开始只会得到一场纯静音会话 —— 用户实测反馈的原话就是
       // "助手软件都没打开、根本没连接，点开始还能给我启动？"。
-      showHelperOfflineModal();
+      // too_old（协议对不上）必须与"没运行"分开说：老助手的窗口就摆在用户眼前，
+      // 说"没运行"是误导（可用性审查 S4）
+      showHelperOfflineModal(action);
       setStatus('Stopped');
-      log(tSync(currentLang, 'helperOfflineLog'));
+      log(tSync(currentLang, action === 'too_old' ? 'helperTooOldTitle' : 'helperOfflineLog'));
       return;
     }
     if (action === 'pair') {
@@ -2273,13 +2340,17 @@ onMessageFromHost((msg) => {
       // 只在日志区提醒一句（**不带**"错误："前缀，它不是错误），不置 Stopped、不弹模态。
       log(String(msg.message || ''));
       break;
-    case 'ERROR':
-      // 坑：errorPrefix 的 {m} 是占位符，须手动 replace（与 searchHits 同一套约定）
-      log(tSync(currentLang, 'errorPrefix').replace('{m}', String(msg.message)));
+    case 'ERROR': {
+      // 坑：errorPrefix 的 {m} 是占位符，须手动 replace（与 searchHits 同一套约定）。
+      // 又一类坑（复审抓到）：助手侧运行期错误在 helper.helperErrorMessage 里**已经**套过
+      // 一次 errorPrefix，这里再套一次就变成"错误：错误：…"。所以先看是否已带前缀。
+      const raw = String(msg.message ?? '');
+      log(withErrorPrefix(raw));
       // 麦克风启动失败升级为模态：授权框没出现就闪退时，这是用户唯一读得到原因的地方
       if (msg.micFailure) showMicErrorModal(String(msg.message || ''));
       setStatus('Stopped');
       break;
+    }
     case 'LOCK_CHANGED':
       locked = msg.locked;
       updateLockUI();
