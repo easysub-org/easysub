@@ -28,6 +28,8 @@ export interface OverlayOptions {
   // 纯 Web 版的字幕浮窗与面板是**两个窗口**，chrome 消息不存在，必须换成跨窗口通道，
   // 否则浮窗里点锁定面板毫无反应（静默失效）。
   onLockChanged?: (locked: boolean) => void;
+  /** 常驻提示被用户点掉后的收尾（悬浮窗用它"会话没在跑就关窗"，别留一个空窗）。 */
+  onNoticeDismiss?: () => void;
 }
 
 const BG_MODES: OverlayBgMode[] = ['glass', 'solid', 'outline'];
@@ -59,6 +61,7 @@ export class Overlay {
   private fill = false;
   private absoluteFill = false;
   private onLockChanged: ((locked: boolean) => void) | null;
+  private onNoticeDismiss: (() => void) | null = null;
 
   private overlay: HTMLDivElement | null = null;
   private prevEl: HTMLDivElement | null = null;
@@ -105,6 +108,7 @@ export class Overlay {
     this.fill = options.fill === true;
     this.absoluteFill = options.absoluteFill === true;
     this.onLockChanged = options.onLockChanged ?? null;
+    this.onNoticeDismiss = options.onNoticeDismiss ?? null;
     this.mountTarget = options.mountTarget
       || (() => (this.trackFullscreen ? this.fullscreenMount() : document.body));
     if (this.trackFullscreen) {
@@ -842,7 +846,16 @@ export class Overlay {
       const el = document.createElement('div');
       el.className = 'overlay-notice';
       el.title = tSync(this._lang, 'noticeDismiss');
-      el.addEventListener('click', () => this.clearNotice());
+      // 复核 P1-3：锁定态下叠层整体是 pointer-events:none（见本文件 lockBtn/reviewBtn 的同款处理），
+      // 提示不显式开 auto 的话它的 click 永远不触发 —— "点这里关掉"就是句假话。
+      el.style.pointerEvents = 'auto';
+      el.addEventListener('click', () => {
+        this.clearNotice();
+        // 复核 P1-4：会话已经停了、窗口是被刻意留下的 —— 点掉提示后如果什么都不做，
+        // 用户会面对一个空浮窗 + 置灰的停止按钮、窗内没有关闭入口。宿主借这个回调收尾
+        // （悬浮窗的实现是"会话没在跑就关窗"）。
+        this.onNoticeDismiss?.();
+      });
       this.overlay.appendChild(el);
       this.noticeEl = el;
     }

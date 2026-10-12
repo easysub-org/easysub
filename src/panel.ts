@@ -1244,12 +1244,15 @@ function pushLocalLog(level: string, source: string, message: string,
     // 与 logbus 同一套归一化（换行压平）——否则同一条多行日志在合并前后文本都不同，去重也会失败
     message: normalizeMessage(message),
   };
-  panelLogs.push(entry);
+  // 按 id 幂等：宿主可能把同一条回播两次（或我们自己先记了、宿主再广播），
+  // 同一个 id 就地替换而不是又 push 一条 —— 日志窗里"同一条出现两遍"是最招人烦的。
+  const seen = panelLogs.findIndex((e) => e.id === entry.id);
+  if (seen >= 0) panelLogs[seen] = entry;
+  else panelLogs.push(entry);
   if (panelLogs.length > 500) panelLogs = panelLogs.slice(-500);
   if (logsOpen) renderLogs();
   return entry;
 }
-
 /**
  * 合并宿主那份与面板本地那份：**按稳定 id 去重**（原来用"时间+来源+内容"，而时间戳每一跳
  * 都会被重新盖章 → 同一条日志永远去不掉，日志窗里每行出现两三遍。独立审查 B1）。
@@ -1281,6 +1284,7 @@ function renderLogs(): void {
   // 日志拽回底部（新的还在实时追加），刚做的文本选择也被清掉。现在：本来就贴着底部才跟随，
   // 否则保持用户的滚动位置。
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+  const prevScroll = list.scrollTop;      // textContent='' 会把 scrollTop 夹到 0，先记下来
   list.textContent = '';
   if (!rows.length) {
     const empty = document.createElement('div');
@@ -1300,7 +1304,9 @@ function renderLogs(): void {
   }
   const count = $opt('logCount');
   if (count) count.textContent = tSync(currentLang, 'logsCount').replace('{n}', String(rows.length));
-  if (atBottom) list.scrollTop = list.scrollHeight;   // 贴着底部才跟随最新
+  // 复核 P1-6：`textContent=''` 会把 scrollTop 夹到 0，所以"不贴底"时必须把原位置**写回去**，
+  // 否则用户每来一条新日志就被拽到最顶部（比原来的"总被拽到底部"还糟）。
+  list.scrollTop = atBottom ? list.scrollHeight : prevScroll;
 }
 
 function openLogs(): void {
@@ -1308,6 +1314,9 @@ function openLogs(): void {
   const modal = $opt('logModal');
   if (modal) modal.hidden = false;
   renderLogs();
+  // 复核 P1-5：把焦点移进模态，否则 Esc 只是挂在模态上的监听、永远收不到事件
+  // （打开后焦点还在触发按钮上，它是模态的兄弟节点）。
+  (modal as HTMLElement | null)?.focus?.();
   // 宿主那份才是全量（含 background/offscreen/助手消息），拉过来合并一次。
   // 记下发起时的"清空序号"：期间用户点了清空就丢弃这份响应（独立审查 B9）。
   const gen = logsClearedAt;
@@ -1379,9 +1388,10 @@ function wireLogs(): void {
   $opt('logModal')?.addEventListener('click', (e) => {
     if ((e.target as HTMLElement)?.id === 'logModal') closeLogs();
   });
-  // 独立审查 B8：其它窗中窗都能 Esc 关，这个也得能（否则键盘用户被"关在里面"）。
-  $opt('logModal')?.addEventListener('keydown', (e) => {
-    if ((e as KeyboardEvent).key === 'Escape') closeLogs();
+  // 独立审查 B8 + 复核 P1-5：Esc 必须挂到 **document** —— 挂在模态元素上时，没有 tabindex
+  // 又不 focus 的话事件根本进不来（其它模态都走 document/window 级）。
+  document.addEventListener('keydown', (e) => {
+    if (logsOpen && (e as KeyboardEvent).key === 'Escape') closeLogs();
   });
   applyLogsLang();
 }
@@ -1400,6 +1410,9 @@ function applyLogsLang(): void {
   set('logOnlyErrorsLabel', 'logsOnlyErrors');
   const close = $opt('logClose');
   if (close) close.setAttribute('aria-label', tSync(currentLang, 'logsClose'));
+  // 复核 P2-10：计数/空态文案是 renderLogs 写进去的，切语言后必须重渲染一次，
+  // 否则日志窗停在旧语言直到下一条日志或用户点了筛选。
+  if (logsOpen) renderLogs();
 }
 
 function log(msg: string, record = true) {
@@ -2535,10 +2548,12 @@ onMessageFromHost((msg) => {
       log(msg.message, false);
       break;
     case 'LOG_APPEND':
-      // 宿主广播的新日志（它自己/引擎/助手那几条）。**跳过 source==='panel'**：面板自己的
-      // 日志已经本地记过一遍，回播会变成两条（"日志里同一条出现两遍"最招人烦）。
-      if (msg.entry && msg.entry.source !== 'panel') {
-        pushLocalLog(msg.entry.level || 'info', msg.entry.source || 'app', msg.entry.message || '');
+      // 宿主广播的新日志（它自己/引擎/助手那几条）。**必须沿用它的 id/t**：
+      // 上一轮我以为"跳过 source==='panel'"就够了，但 helper/engine 这类来源仍会在面板本地被
+      // 重新盖一个新 id → 按 id 去重永远配不上 → 日志窗照旧一行两遍（复核 P0-1，必现）。
+      if (msg.entry) {
+        pushLocalLog(msg.entry.level || 'info', msg.entry.source || 'app', msg.entry.message || '',
+                     { t: msg.entry.t, id: msg.entry.id });
       }
       break;
     case 'HELPER_SILENT':

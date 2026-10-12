@@ -439,7 +439,17 @@ export class HelperSource {
           // 优先用页面自己的 i18n 按稳定 code 渲染（助手带的 message 是桌面端语言的兜底）。
           // 例：助手窗口处于暂停 → code='paused' → 页面按自己的语言说"去助手窗口点启动"。
           const code = String(msg.code || 'error');
-          this.opts.onError?.(helperErrorMessage(code, String(msg.message || ''), this.opts.lang || 'zh_CN'), code);
+          // 坑（遗留清单核实 #3）：助手在协议里带了 `fatal`，页面却从来没读 ——
+          // 于是助手明确标了 `fatal: false` 的可恢复提示（例如 `bad_message`，只是协议漂移）
+          // 也会走 ERROR 分支，把整场识别连模型一起拆掉。尊重助手自己的判断，
+          // 静音清单只当**老版本助手**（不发 fatal）时的兜底。
+          const recoverable = msg.fatal === false;
+          // 可恢复时用助手自己那句（准确）而不是把 bad_message 硬套成"暂停"文案；
+          // 路由用的 code 换成静音类，让上层只记日志 + 提示、不拆会话。
+          const text = recoverable
+            ? (String(msg.message || '') || helperErrorMessage(code, '', this.opts.lang || 'zh_CN'))
+            : helperErrorMessage(code, String(msg.message || ''), this.opts.lang || 'zh_CN');
+          this.opts.onError?.(text, recoverable ? 'paused' : code);
           break;
         }
         default:

@@ -65,6 +65,12 @@ export class SubtitleShell {
       trackFullscreen: false,
       fill: true,
       onLockChanged: opts.onLockChanged,
+      // 复核 P1-4：会话已停时窗口是被**刻意保留**下来显示错误原因的 —— 用户点掉那条提示
+      // 就说明看完了，而此时窗内没有关闭入口（停止按钮已置灰），必须替他关掉，
+      // 否则留下一个空浮窗，只能去点系统标题栏的 ✕。
+      onNoticeDismiss: () => {
+        if (!this.running) window.close();
+      },
     });
   }
 

@@ -53,6 +53,8 @@
       font: 400 12px/1.5 system-ui, sans-serif; padding: 6px 9px; border-radius: 8px; cursor: pointer;
       background: rgba(17, 24, 39, .84); color: #f9fafb; backdrop-filter: blur(6px);
       box-shadow: 0 6px 18px rgba(0, 0, 0, .28);
+      /* 锁定字幕时叠层整体 pointer-events:none：提示必须自己开回来，否则点不掉 */
+      pointer-events: auto;
     }
     .overlay-notice.error { background: rgba(153, 27, 27, .9); }
 

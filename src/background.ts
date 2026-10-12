@@ -243,6 +243,10 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onMessage.addListener((m: any) => {
       if (m?.type === 'MIC_CHUNK') {
         if (!m.audio) return;
+        // 复核 P0-2：只在**当前会话确实是 mic** 时才转发。保留浮窗的例外路径能让旧 mic 采集
+        // 活过会话边界，而 feedMicChunk 不判来源（只判 pipeline 存不存在）→ 会把麦克风
+        // 混进下一场系统音频会话。这里按会话音源门控，双保险。
+        if (sessionSource !== 'mic') return;
         // audio 是 number[]（Port 的 JSON 克隆所致，见 floating.ts 注释），原样中继即可
         try { offscreenPort?.postMessage({ type: 'MIC_CHUNK', audio: m.audio, sampleRate: m.sampleRate }); } catch { /* offscreen 未就绪，丢弃本块 */ }
         return;
@@ -533,6 +537,10 @@ function cleanupAll() {
   sessionStartedAt = 0; // 会话终结即清开始戳（epoch 失配/STOP/错误清理统一走这里）
   bgLevels = []; // 波形快照随之清空：停止后的面板不再显示已结束会话的电平残留
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  // mic 的采集端在悬浮窗里：下面"保留浮窗看错误"的分支必须先知道本场是不是 mic ——
+  // sessionSource 紧接着就会被重置成 'tab'（复核 P0-2 时正是这里踩了：判断写在重置之后，
+  // 于是麦克风永不停止采集，tsc 还会报"两个类型没有交集"）。
+  const wasMic = sessionSource === 'mic';
   sessionSource = 'tab';
   const tabId = captureTabId;
   pipelineStatus = 'Stopped';
@@ -563,9 +571,17 @@ function cleanupAll() {
   // 生命周期绑定（悬浮窗随会话）：会话停止即关闭悬浮窗——system 模式下它是唯一显示端，
   // 会话结束没有继续存在的意义。closeFloating 会触发 windows.onRemoved，彼时
   // pipelineStatus 已是 Stopped，onRemoved 里的"关窗即停止"守卫自然跳过，不会二次清理。
-  // 例外：刚发了错误提示时留着它，让用户读得到原因（否则"闪一下就消失"）。用户点一下即关。
+  // 例外：刚发了错误提示时留着它，让用户读得到原因（否则"闪一下就消失"）。用户点提示即关窗
+  // （见 overlay 的 onNoticeDismiss）。
   if (keepFloatingForNotice) {
     keepFloatingForNotice = false;
+    // 复核 P0-2（真 bug）：留着浮窗时**必须显式停 mic** —— 浮窗就是麦克风的采集端，
+    // 会话已经 Stopped 却没人发 MIC_CAPTURE_STOP，麦克风会一直热着（指示灯常亮），
+    // 而且下一场 system/helper 会话复用同一窗口时，旧 mic 的 MIC_CHUNK 会被喂进新管道
+    // （系统音频里混进麦克风声音）。tab 会话没有浮窗，但 pendingNotice 也要清掉，
+    // 否则以后"不走 START 就开浮窗"的路径会把上一条旧错误回播出去（复核 P2-9）。
+    pendingNotice = null;
+    if (wasMic) sendToFloating({ type: 'MIC_CAPTURE_STOP' });
   } else {
     closeFloating();
   }
@@ -907,8 +923,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     } else {
       // 非 tab 音源（系统音频/麦克风/桌面助手）没有可注入的叠层，唯一显示端就是悬浮窗：
       // 这个勾选框必须真的能开关它，否则就是"点了没反应"（独立审查 M1）。
+      // **例外：mic 会话不能关**（复核 P2-8）—— 浮窗就是麦克风的采集端，关窗会被
+      // handleFloatingClosed 当成"用户关窗即停"处理（静默结束整场识别）。mic 想让字幕
+      // 消失目前只能停会话，这一点写进面板的音源提示里。
       if (msg.visible) openFloating().catch((e) => console.log('[TM BG] 打开悬浮字幕窗失败:', e));
-      else closeFloating();
+      else if (sessionSource !== 'mic') closeFloating();
     }
   }
 
