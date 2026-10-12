@@ -21,6 +21,8 @@ import { AsrEngine } from '../asr-engine';
 import { MicCapture, micErrorText } from '../mic-capture';
 import { appendHelperErrorHint, HelperSource, isHelperSilentCode, loadHelperSession } from '../helper';
 import { createLogBuffer } from '../logbus';
+import { apiSettingsFromPrefs } from '../translate-api';
+import type { TranslateApiSettings } from '../translate-api';
 import { emitToPanel, onHostMessage, resolveUrl, storage } from '../platform';
 import { tSync } from '../i18n';
 import { appendTranscript, attachTranscriptTranslation } from '../transcript-store';
@@ -412,6 +414,8 @@ async function readSessionConfig(): Promise<{
   hotwords: string[] | null;
   translationEnabled: boolean; translationDirection: 'auto' | 'zh-en' | 'en-zh';
   translationTiming: 'stream' | 'final';
+  /** 翻译来源 + OpenAI 兼容 API 配置（与扩展 background 同构） */
+  translationApi: TranslateApiSettings;
 }> {
   const [langR, punctR, prefsR, hotwordsR] = await Promise.all([
     storage.get('tmspeech_lang'),
@@ -432,6 +436,8 @@ async function readSessionConfig(): Promise<{
     translationEnabled: prefs.translationEnabled === true,
     translationDirection: tdir === 'zh-en' || tdir === 'en-zh' ? tdir : 'auto',
     translationTiming: prefs.translationTiming === 'final' ? 'final' : 'stream',
+    // 翻译来源 + OpenAI 兼容 API 配置（与扩展 background 用同一份解析）
+    translationApi: apiSettingsFromPrefs(prefs),
   };
 }
 
@@ -526,6 +532,7 @@ export function installWebHost() {
           msg.enabled === true,
           msg.direction === 'zh-en' || msg.direction === 'en-zh' ? msg.direction : 'auto',
           msg.timing === 'final' ? 'final' : 'stream',
+          msg.api,                       // 翻译来源 + OpenAI 兼容 API 配置
         );
         return true;
 

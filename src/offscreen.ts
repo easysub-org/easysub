@@ -158,6 +158,7 @@ function setupPort() {
             msg.enabled === true,
             msg.direction === 'zh-en' || msg.direction === 'en-zh' ? msg.direction : 'auto',
             msg.timing === 'final' ? 'final' : 'stream',
+            msg.api,                     // 翻译来源 + OpenAI 兼容 API 配置（改了就当场生效）
           );
           break;
         case 'MIC_CHUNK':

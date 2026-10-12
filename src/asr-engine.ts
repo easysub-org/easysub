@@ -18,6 +18,7 @@ import { addPunctuation } from './punctuator';
 import { resample } from './audio-processor';
 import { getModelFile } from './model-db';
 import { probeBundledResource } from './platform';
+import type { TranslateApiSettings } from './translate-api';
 
 // ---- wasm 脚本动态注入（nomodel 支持）----
 // 宿主页面只静态加载 preload.js（仅定义 Module 不拉资源）。三个 wasm 脚本必须等
@@ -73,6 +74,8 @@ export interface InitOptions {
   translationEnabled?: boolean;
   translationDirection?: 'auto' | 'zh-en' | 'en-zh';
   translationTiming?: 'stream' | 'final';
+  /** 翻译来源与 OpenAI 兼容 API 配置（'builtin' 时忽略其余字段）。 */
+  translationApi?: TranslateApiSettings;
   // 宿主预取的屏幕共享音频流（纯 Web 版专用）。getDisplayMedia 需要瞬时用户激活，
   // 而 Web 版的启动链路里隔着模型检查等异步步骤，等走到引擎这步手势已失效，
   // 所以由面板在点击任务内先取流，engine 直接消费。扩展侧不传（offscreen 文档
@@ -130,6 +133,8 @@ export class AsrEngine {
   private translateDirection: 'auto' | 'zh-en' | 'en-zh' = 'auto';
   // 翻译时机：stream=实时跟句（中间态重译）｜final=仅定稿（句完才翻，最省 CPU）
   private translationTiming: 'stream' | 'final' = 'stream';
+  /** 翻译来源与 API 配置（worker 内部据此分流；调度完全不知道它的存在）。 */
+  private translateApiCfg: TranslateApiSettings | null = null;
   private translateWarned = false;
 
   // 当前识别句的序号（从 1 起）。随 SENTENCE_DONE 递增，随每次 TRANSLATE 消息带给 worker，
@@ -247,7 +252,11 @@ export class AsrEngine {
     this.translateDirection = msg.translationDirection === 'zh-en' || msg.translationDirection === 'en-zh'
       ? msg.translationDirection : 'auto';
     this.translationTiming = msg.translationTiming === 'final' ? 'final' : 'stream';
+    // 翻译来源（内置离线模型 / 用户自己的 OpenAI 兼容 API）随会话配置下发；改动它不影响
+    // 任何调度逻辑：worker 内部按 source 分流，TRANSLATE/TRANSLATION 协议完全一致。
+    this.translateApiCfg = msg.translationApi ?? null;
     if (this.translateEnabled) this.ensureTranslateWorker();
+    this.sendTranslateConfig();
     this.resetTranslationState();
 
     // 坑：跨会话残留的文本状态会让新会话开头闪出上一场的字幕；这里全部清零，
@@ -631,6 +640,23 @@ export class AsrEngine {
     });
   }
 
+  /**
+   * 把「翻译来源」配置推给 worker。
+   * 三处共用：会话配置落地、运行中改设置、点「测试翻译」。**调度完全不知道它的存在** ——
+   * worker 内部按 source 分流，TRANSLATE/TRANSLATION 协议与队列语义一行没改。
+   */
+  private sendTranslateConfig() {
+    if (!this.translateWorker) return;
+    try {
+      this.translateWorker.postMessage({
+        type: 'TRANSLATION_CONFIG',
+        ...(this.translateApiCfg || { source: 'builtin' }),
+      });
+    } catch (e) {
+      this.log('翻译配置下发失败: ' + e);
+    }
+  }
+
   private ensureTranslateWorker() {
     if (this.translateWorker || !this.translateEnabled) return;
     try {
@@ -657,6 +683,8 @@ export class AsrEngine {
         this.testOwnedWorker = false;
       }
       this.translateTestResolver = resolve;
+      // 把「翻译来源」配置推给 worker（测试按钮也要测**当前来源**：选 API 就测 API）
+      this.sendTranslateConfig();
       // 测试用 24 个 token 上限：短句足够验证模型可用，避免单线程生成跑满 128 token 久久不返回
       this.translateWorker!.postMessage({
         type: 'TRANSLATE', text, direction, kind: 'final',
@@ -727,11 +755,16 @@ export class AsrEngine {
   // 当场生效（扩展侧同一份实现，两端行为一致）。
   // 注意方向/时机只影响后续请求：在途那条仍按发出时的方向返回，回包按 seq+gen 对账，
   // 不会错位；切到 final 只是不再入队中间态。
-  setTranslationLive(enabled: boolean, direction: 'auto' | 'zh-en' | 'en-zh', timing: 'stream' | 'final') {
+  setTranslationLive(enabled: boolean, direction: 'auto' | 'zh-en' | 'en-zh', timing: 'stream' | 'final',
+                     api?: TranslateApiSettings) {
     this.translateEnabled = enabled;
     this.translateDirection = direction;
     this.translationTiming = timing;
-    this.log(`实时翻译（本场生效）: ${enabled ? '开' : '关'} 方向=${direction} 时机=${timing}`);
+    // 运行中改「翻译来源」/API 配置也要当场生效（否则用户改了地址、模型名却仍用旧的，
+    // 只能重启会话——那正是"改了没反应"的经典体验）。
+    if (api) this.translateApiCfg = api;
+    this.log(`实时翻译（本场生效）: ${enabled ? '开' : '关'} 方向=${direction} 时机=${timing}`
+      + (api ? ` 来源=${api.source}${api.source === 'api' ? '(' + (api.model || '未填模型') + ')' : ''}` : ''));
     if (!enabled) {
       // 关掉就停掉在途与积压，不再占用 CPU；worker 留着下次秒开
       this.inFlight = null;
@@ -741,6 +774,7 @@ export class AsrEngine {
     }
     this.translateWarned = false;
     this.ensureTranslateWorker();
+    this.sendTranslateConfig();
     // 刚打开时把"当前这一句"补进去：否则要等到下一句才有译文，用户以为没生效
     if (this.prevSentence) this.translateBacklog(this.sentenceSeq - 1, this.prevSentence);
   }

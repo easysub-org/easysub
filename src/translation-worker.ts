@@ -6,8 +6,21 @@
 // 这里重写 fetch 把 transformers.js 的本地模型请求映射到 IndexedDB，全程零网络零权限。
 import { pipeline, env } from '@huggingface/transformers';
 import { getModelFile, listModelKeys } from './model-db';
+import {
+  API_TIMEOUT_MS, DEFAULT_API_BASE, buildApiRequest, describeApiError, extractTranslation, type ApiConfig,
+} from './translate-api';
 
 type Pipe = any;
+
+/**
+ * 翻译来源（用户可在面板切换）：
+ *  · 'builtin'：下面这套 transformers.js 离线模型（默认，现状不变）
+ *  · 'api'    ：用户自己的 OpenAI 兼容 API（/v1），支持自定义 Headers 与请求体字段
+ * 两条来源**共用同一个 worker、同一套 TRANSLATE/TRANSLATION 协议** —— 队列、跟句重译、
+ * 定稿、seq/epoch 对账、延迟显示都不需要知道用的是哪一种（调度一行不动）。
+ */
+let source: 'builtin' | 'api' = 'builtin';
+let apiConfig: ApiConfig | null = null;
 
 // 方向 → 模型目录名（与发布到 GitHub Releases 的模型包目录一一对应）
 const MODEL_PAIRS: Record<string, string> = {
@@ -119,7 +132,45 @@ async function getPipeline(modelId: string): Promise<LoadResult> {
   }
 }
 
+/**
+ * OpenAI 兼容 API 的一次翻译。
+ * 超时**必须有界**（AbortController）：调度没改，但新来源要自己保证慢模型不把队列堵死。
+ */
+async function translateViaApi(text: string, direction: 'auto' | 'zh-en' | 'en-zh',
+                               maxNewTokens: number): Promise<string | null> {
+  if (!apiConfig) throw new Error('API 未配置：请在面板「实时翻译 → 翻译来源」里填地址与模型名');
+  const { url, headers, body } = buildApiRequest(apiConfig, text, direction, maxNewTokens);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+  const t0 = Date.now();
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => '')).slice(0, 200);
+      throw new Error(describeApiError(res.status, detail));
+    }
+    const payload = await res.json().catch(() => null);
+    const out = extractTranslation(payload);
+    console.log('[translation-worker] api done', (Date.now() - t0) + 'ms', JSON.stringify(out).slice(0, 80));
+    if (out == null) throw new Error('响应里没有译文（模型可能拒答或返回了别的格式）');
+    return out;
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      throw new Error(`翻译超时（>${Math.round(API_TIMEOUT_MS / 1000)} 秒）：换更小的模型，或把超时留长一点的服务`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function translate(text: string, direction: 'auto' | 'zh-en' | 'en-zh', maxNewTokens = 128): Promise<string | null> {
+  if (source === 'api') return translateViaApi(text, direction, maxNewTokens);
   setup();
   if (setupError) throw new Error(setupError);
   const modelId = modelIdFor(direction, text);
@@ -149,6 +200,22 @@ self.onmessage = (e: MessageEvent) => {
   if (msg.type === 'RESET_MODEL_CACHE') {
     for (const k of Object.keys(loadCache)) delete loadCache[k];
     setupError = null;
+    return;
+  }
+  if (msg.type === 'TRANSLATION_CONFIG') {
+    // 面板里的「翻译来源」+ API 三项（地址/模型/Key）+ 用户自定义 Headers/请求体字段。
+    // 会话开始时随 setTranslationLive 一起下发；不改任何队列语义。
+    source = msg.source === 'api' ? 'api' : 'builtin';
+    apiConfig = source === 'api'
+      ? {
+          base: String(msg.base || DEFAULT_API_BASE),
+          model: String(msg.model || ''),
+          key: String(msg.key || ''),
+          headersText: String(msg.headersText || ''),
+          bodyText: String(msg.bodyText || ''),
+          reasoning: String(msg.reasoning || ''),
+        }
+      : null;
     return;
   }
   if (msg.type !== 'TRANSLATE') return;

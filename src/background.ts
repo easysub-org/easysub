@@ -2,6 +2,7 @@
 // Copyright (C) 2026 hcz1017
 import { t } from './i18n';
 import { createLogBuffer } from './logbus';
+import { apiSettingsFromPrefs } from './translate-api';
 // 字幕记录的读写全部收敛在 transcript-store（与纯 Web 版共用同一份实现）；
 // 这里只需要追加与挂译文两个入口，其余导出留给未来可能用到的地方。
 import { appendTranscript, attachTranscriptTranslation } from './transcript-store';
@@ -794,6 +795,9 @@ async function startRecognition(msg: any, respond: () => void) {
     const tdir = prefs.translationDirection;
     initMsg.translationDirection = tdir === 'zh-en' || tdir === 'en-zh' ? tdir : 'auto';
     initMsg.translationTiming = prefs.translationTiming === 'final' ? 'final' : 'stream';
+    // 翻译来源 + OpenAI 兼容 API 配置（地址/模型/Key、自定义 Headers 与请求体字段、推理控制）
+    // 一起随 INIT 下发；全部来自持久化偏好，缺省走内置离线模型。
+    initMsg.translationApi = apiSettingsFromPrefs(prefs);
     // 热词随 INIT 下发：offscreen 建 recognizer 时一次性烘焙进配置
     if (sessionHotwords) initMsg.hotwords = sessionHotwords;
     if (offscreenPort) {
@@ -980,6 +984,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       enabled: msg.enabled,
       direction: msg.direction,
       timing: msg.timing,
+      api: msg.api,
     });
   }
 

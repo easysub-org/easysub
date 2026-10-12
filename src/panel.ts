@@ -10,6 +10,8 @@
 //
 // 纪律：新增功能优先加在本文件 + ui-body.html 里，两端自动共享；
 // 只有真的需要 chrome.* 才按 IS_EXTENSION 分支，并且分支必须在 platform.ts 有对应封装。
+import { apiSettingsFromPrefs } from './translate-api';
+import type { TranslateApiSettings } from './translate-api';
 import { dedupeLogs, formatEntry, nextLogId, normalizeMessage } from './logbus';
 import { getLang, setLang, tSync } from './i18n';
 import {
@@ -478,6 +480,7 @@ requestAnimationFrame(() => {
 async function applyLang() {
   currentLang = await getLang();
   applyLogsLang();
+  applyTranslateApiLang();
   const tr = (key: string) => tSync(currentLang, key);
   $('appTitle').textContent = tr('appTitle');
   $('btnStartText').textContent = tr('btnStart');
@@ -690,6 +693,14 @@ async function loadPrefs() {
   applyTranslateDir(TRANSLATE_DIRS.includes(tdir) ? tdir : 'auto');
   // 翻译时机：白名单校验，非法值回退 stream（实时跟句，与旧行为一致）
   applyTranslateTiming(prefs.translationTiming === 'final' ? 'final' : 'stream');
+  // 翻译来源 + OpenAI 兼容 API 设置（全部持久化；缺省 = 内置离线模型、地址留空用默认值）
+  applyTranslateSource(prefs.translateSource === 'api' ? 'api' : 'builtin');
+  ($opt('inpApiBase') as HTMLInputElement | null)!.value = String(prefs.translateApiBase ?? '');
+  ($opt('inpApiModel') as HTMLInputElement | null)!.value = String(prefs.translateApiModel ?? '');
+  ($opt('inpApiKey') as HTMLInputElement | null)!.value = String(prefs.translateApiKey ?? '');
+  ($opt('inpApiReasoning') as HTMLInputElement | null)!.value = String(prefs.translateApiReasoning ?? '');
+  ($opt('inpApiHeaders') as HTMLTextAreaElement | null)!.value = String(prefs.translateApiHeaders ?? '');
+  ($opt('inpApiBody') as HTMLTextAreaElement | null)!.value = String(prefs.translateApiBody ?? '');
   updateTranslateUi();
   // 历史字幕显示译文：默认开（!== false）
   chkTranscriptTr.checked = prefs.transcriptTrEnabled !== false;
@@ -1759,6 +1770,7 @@ async function doStart(): Promise<void> {
 }
 
 wireLogs();   // 日志窗（默认关闭；点底部按钮展开）的接线
+wireTranslateApi();  // 翻译来源 + OpenAI 兼容 API 表单的接线
 
 export function triggerStart(): void { void doStart(); }
 btnStart.onclick = () => { void doStart(); };
@@ -2329,6 +2341,84 @@ document.querySelectorAll<HTMLButtonElement>('#translateTimingRow .seg').forEach
 // 运行中改实时翻译设置：只有会话在跑时才需要通知宿主（空闲时改的就是"下次生效"，
 // 由 START 时的配置回源读取）。不通知的话运行中改开关/方向/时机是完全静默无效的
 // ——用户会以为功能坏了（实测反馈过"网页版翻译用不了"）。
+/** 当前选中的翻译来源。 */
+function activeTranslateSource(): 'builtin' | 'api' {
+  const active = document.querySelector('#translateSourceRow .seg.active') as HTMLElement | null;
+  return active?.dataset.source === 'api' ? 'api' : 'builtin';
+}
+
+/** 切来源：显示/隐藏 API 表单，并同步内置模型相关的入口（选 API 时它们没有意义）。 */
+function applyTranslateSource(src: 'builtin' | 'api') {
+  for (const btn of Array.from(document.querySelectorAll('#translateSourceRow .seg'))) {
+    const el = btn as HTMLElement;
+    const on = el.dataset.source === src;
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+  const block = $opt('tapiBlock');
+  if (block) block.hidden = src !== 'api';
+  const pick = $opt('btnPickModel');
+  if (pick) (pick as HTMLElement).hidden = src === 'api';
+}
+
+/** 从**表单当前值**组装 API 配置（改完立刻生效，不必等会话重启）。 */
+function translateApiFromUi(): TranslateApiSettings {
+  return apiSettingsFromPrefs({
+    translateSource: activeTranslateSource(),
+    translateApiBase: ($opt('inpApiBase') as HTMLInputElement | null)?.value,
+    translateApiModel: ($opt('inpApiModel') as HTMLInputElement | null)?.value,
+    translateApiKey: ($opt('inpApiKey') as HTMLInputElement | null)?.value,
+    translateApiReasoning: ($opt('inpApiReasoning') as HTMLInputElement | null)?.value,
+    translateApiHeaders: ($opt('inpApiHeaders') as HTMLTextAreaElement | null)?.value,
+    translateApiBody: ($opt('inpApiBody') as HTMLTextAreaElement | null)?.value,
+  });
+}
+
+/** 持久化 API 表单 + 让运行中的会话当场生效（含"改了来源/模型名不用重启"）。 */
+function saveTranslateApiSettings() {
+  const api = translateApiFromUi();
+  savePrefs({
+    translateSource: api.source,
+    translateApiBase: ($opt('inpApiBase') as HTMLInputElement | null)?.value ?? '',
+    translateApiModel: api.model,
+    translateApiKey: api.key,
+    translateApiReasoning: api.reasoning,
+    translateApiHeaders: api.headersText,
+    translateApiBody: api.bodyText,
+  });
+  updateTranslateUi();
+  pushTranslateLive();
+}
+
+/** 语言切换时刷新这一块（与其它翻译控件同一时机）。 */
+function applyTranslateApiLang(): void {
+  const tr = (k: string) => tSync(currentLang, k);
+  for (const [id, key] of [['lbApiBase', 'lbApiBase'], ['lbApiModel', 'lbApiModel'],
+                           ['lbApiKey', 'lbApiKey'], ['lbApiReasoning', 'lbApiReasoning'],
+                           ['lbApiHeaders', 'lbApiHeaders'], ['lbApiBody', 'lbApiBody']] as const) {
+    const el = $opt(id);
+    if (el) el.textContent = tr(key);
+  }
+  const note = $opt('tapiNote');
+  if (note) note.textContent = tr('tapiNote');
+  const tip = $opt('helpTipTranslateApi');
+  if (tip) tip.textContent = tr('helpTipTranslateApi');
+}
+
+function wireTranslateApi(): void {
+  for (const btn of Array.from(document.querySelectorAll('#translateSourceRow .seg'))) {
+    btn.addEventListener('click', () => {
+      const src = (btn as HTMLElement).dataset.source === 'api' ? 'api' : 'builtin';
+      applyTranslateSource(src);
+      saveTranslateApiSettings();
+    });
+  }
+  for (const id of ['inpApiBase', 'inpApiModel', 'inpApiKey', 'inpApiReasoning', 'inpApiHeaders', 'inpApiBody']) {
+    $opt(id)?.addEventListener('change', saveTranslateApiSettings);
+  }
+  applyTranslateApiLang();
+}
+
 function pushTranslateLive() {
   if (lastStatus !== 'Running') return;
   sendToHost({
@@ -2336,11 +2426,23 @@ function pushTranslateLive() {
     enabled: chkTranslate.checked,
     direction: activeTranslateDir(),
     timing: activeTranslateTiming(),
+    // 翻译来源 + API 配置一起推给引擎：改了地址/模型名/推理控制立刻生效（不用重启会话）
+    api: translateApiFromUi(),
   }).catch(() => {});
 }
 
 function buildTranslateNotice() {
   translateNotice.textContent = '';
+  // API 模式没有"内置模型未导入"这回事：这里缺的是地址/模型名（两条来源的提示必须各说各的）
+  if (activeTranslateSource() === 'api') {
+    if (!translateApiFromUi().model) {
+      translateNotice.appendChild(document.createTextNode(tSync(currentLang, 'tapiNeedModel')));
+      translateNotice.style.display = '';
+    } else {
+      translateNotice.style.display = 'none';
+    }
+    return;
+  }
   translateNotice.appendChild(document.createTextNode(tSync(currentLang, 'translateNeedModel') + ' '));
   const link = document.createElement('a');
   link.href = TRANSLATE_RELEASES_URL;
