@@ -10,6 +10,7 @@
 //
 // 纪律：新增功能优先加在本文件 + ui-body.html 里，两端自动共享；
 // 只有真的需要 chrome.* 才按 IS_EXTENSION 分支，并且分支必须在 platform.ts 有对应封装。
+import { dedupeLogs, formatEntry, nextLogId, normalizeMessage } from './logbus';
 import { getLang, setLang, tSync } from './i18n';
 import {
   storage, sendToHost, onMessageFromHost, getActiveTabId,
@@ -360,6 +361,18 @@ async function detectHelper(full = false) {
     void saveHelperSession(helperSession);
   }
   updateSourceHint();
+  // 日志窗里最有价值的一条（用户想调试"为什么连不上"时先看它）：
+  // 探到没探到、端口、有没有配对、助手是否暂停、版本与协议版本。
+  if (helperInfo) {
+    recordLog('info', 'helper', tSync(currentLang, 'logHelperProbe')
+      .replace('{port}', String(helperInfo.port))
+      .replace('{paired}', String(helperInfo.paired))
+      .replace('{paused}', String(helperInfo.paused))
+      .replace('{version}', String(helperInfo.version || '?'))
+      .replace('{api}', String(helperInfo.api ?? '?')));
+  } else {
+    recordLog('warn', 'helper', tSync(currentLang, 'logHelperProbeNone'));
+  }
 }
 
 // —— 系统音频·选择器前置确认框（两端共用）——
@@ -464,6 +477,7 @@ requestAnimationFrame(() => {
 
 async function applyLang() {
   currentLang = await getLang();
+  applyLogsLang();
   const tr = (key: string) => tSync(currentLang, key);
   $('appTitle').textContent = tr('appTitle');
   $('btnStartText').textContent = tr('btnStart');
@@ -1212,8 +1226,201 @@ function setHeroLoading(key: string | null) {
   log(tSync(currentLang, key));
 }
 
-function log(msg: string) {
+// —— 日志窗（用户要的"窗中窗"：默认关闭，点底部按钮才展开）——
+type PanelLog = { id: string; t: number; level: string; source: string; message: string };
+let panelLogs: PanelLog[] = [];
+let logsOpen = false;
+//: "清空"的序号：作废在途的 GET_LOGS 响应（否则清空后老日志会被它的回调合并回来）。
+let logsClearedAt = 0;
+
+/** 面板本地记录（**始终**记，与日志窗是否打开无关）。 */
+function pushLocalLog(level: string, source: string, message: string,
+                      meta?: { t?: number; id?: string }): PanelLog {
+  const entry: PanelLog = {
+    id: (meta && meta.id) || nextLogId(),
+    t: meta && typeof meta.t === 'number' ? meta.t : Date.now(),
+    level,
+    source,
+    // 与 logbus 同一套归一化（换行压平）——否则同一条多行日志在合并前后文本都不同，去重也会失败
+    message: normalizeMessage(message),
+  };
+  // 按 id 幂等：宿主可能把同一条回播两次（或我们自己先记了、宿主再广播），
+  // 同一个 id 就地替换而不是又 push 一条 —— 日志窗里"同一条出现两遍"是最招人烦的。
+  const seen = panelLogs.findIndex((e) => e.id === entry.id);
+  if (seen >= 0) panelLogs[seen] = entry;
+  else panelLogs.push(entry);
+  if (panelLogs.length > 500) panelLogs = panelLogs.slice(-500);
+  if (logsOpen) renderLogs();
+  return entry;
+}
+/**
+ * 合并宿主那份与面板本地那份：**按稳定 id 去重**（原来用"时间+来源+内容"，而时间戳每一跳
+ * 都会被重新盖章 → 同一条日志永远去不掉，日志窗里每行出现两三遍。独立审查 B1）。
+ * 去重实现放在 logbus 里（纯函数、有单测守门），这里只负责"面板本地优先"的顺序。
+ */
+function mergeLogs(hostEntries: PanelLog[]) {
+  panelLogs = dedupeLogs([hostEntries, panelLogs] as any) as unknown as PanelLog[];
+}
+
+/** 记录一条日志但**不碰状态栏**（状态栏是"当前状态"，日志是历史，两者别混）。 */
+function recordLog(level: 'info' | 'warn' | 'error', source: string, message: string) {
+  if (!message) return;                     // 空消息不该在日志窗里留空行（独立审查 B12）
+  // **先生成身份再记**：同一个 id/t 送给宿主，它回播时带着同一个 id，去重才成立。
+  const meta = { t: Date.now(), id: nextLogId() };
+  pushLocalLog(level, source, message, meta);
+  void sendToHost({ type: 'LOG', level, source, message, t: meta.t, id: meta.id }).catch(() => {});
+}
+
+function visibleLogs(): PanelLog[] {
+  const onlyErrors = ($opt('logOnlyErrors') as HTMLInputElement | null)?.checked === true;
+  return onlyErrors ? panelLogs.filter((e) => e.level === 'warn' || e.level === 'error') : panelLogs;
+}
+
+function renderLogs(): void {
+  const list = $opt('logList');
+  if (!list) return;
+  const rows = visibleLogs();
+  // 独立审查 B7：以前每次渲染都重建全部节点并无条件滚到底 —— 用户想往上翻历史会被每条新
+  // 日志拽回底部（新的还在实时追加），刚做的文本选择也被清掉。现在：本来就贴着底部才跟随，
+  // 否则保持用户的滚动位置。
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+  const prevScroll = list.scrollTop;      // textContent='' 会把 scrollTop 夹到 0，先记下来
+  list.textContent = '';
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'log-empty';
+    // 过滤后为空 ≠ 没有日志（独立审查 N3：用同一句"暂无日志"会让用户以为日志全丢了）
+    const onlyErrors = ($opt('logOnlyErrors') as HTMLInputElement | null)?.checked === true;
+    empty.textContent = tSync(currentLang, onlyErrors ? 'logsNoMatch' : 'logsEmpty');
+    list.appendChild(empty);
+  } else {
+    for (const entry of rows) {
+      const line = document.createElement('span');
+      line.className = 'log-line ' + (entry.level === 'error' ? 'error' : entry.level === 'warn' ? 'warn' : '');
+      // 与 logbus.formatEntry 同格式（复制出去的内容和屏幕上看到的一致）
+      line.textContent = formatEntry(entry as any);
+      list.appendChild(line);
+    }
+  }
+  const count = $opt('logCount');
+  if (count) count.textContent = tSync(currentLang, 'logsCount').replace('{n}', String(rows.length));
+  // 复核 P1-6：`textContent=''` 会把 scrollTop 夹到 0，所以"不贴底"时必须把原位置**写回去**，
+  // 否则用户每来一条新日志就被拽到最顶部（比原来的"总被拽到底部"还糟）。
+  list.scrollTop = atBottom ? list.scrollHeight : prevScroll;
+}
+
+function openLogs(): void {
+  logsOpen = true;
+  const modal = $opt('logModal');
+  if (modal) modal.hidden = false;
+  renderLogs();
+  // 复核 P1-5：把焦点移进模态，否则 Esc 只是挂在模态上的监听、永远收不到事件
+  // （打开后焦点还在触发按钮上，它是模态的兄弟节点）。
+  (modal as HTMLElement | null)?.focus?.();
+  // 宿主那份才是全量（含 background/offscreen/助手消息），拉过来合并一次。
+  // 记下发起时的"清空序号"：期间用户点了清空就丢弃这份响应（独立审查 B9）。
+  const gen = logsClearedAt;
+  void sendToHost({ type: 'GET_LOGS' }).then((resp: any) => {
+    if (gen !== logsClearedAt) return;
+    const entries = Array.isArray(resp?.entries) ? resp.entries : [];
+    if (entries.length) {
+      mergeLogs(entries.slice(-500));
+      renderLogs();
+    }
+  }).catch(() => {});
+}
+
+function closeLogs(): void {
+  logsOpen = false;
+  const modal = $opt('logModal');
+  if (modal) modal.hidden = true;
+}
+
+function clearLogs(): void {
+  panelLogs = [];
+  // 作废在途的 GET_LOGS 响应：否则"打开后立刻清空"时，已经发出、稍后才 resolve 的那份
+  // 会把它 mergeLogs 回来（看起来清空没生效、老日志又活了）。独立审查 B9。
+  logsClearedAt = Date.now();
+  void sendToHost({ type: 'CLEAR_LOGS' }).catch(() => {});
+  renderLogs();
+}
+
+function copyLogs(): void {
+  const rows = visibleLogs();
+  const btn = $opt('logCopy');
+  if (!rows.length) return;                  // 空列表不该把用户的剪贴板清成空串（独立审查 B6）
+  const text = rows.map((e) => formatEntry(e as any)).join('\n');
+  const done = () => {
+    if (!btn) return;
+    const old = btn.textContent;
+    btn.textContent = tSync(currentLang, 'logsCopied');
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  };
+  // 退路：选中列表文本让用户自己按 Ctrl+C。**失败也要走这里**——以前 writeText 被拒时
+  // 只 `.catch(()=>{})`，用户点「复制全部」毫无反应（注释假设的"file:// 没有 clipboard API"
+  // 不成立：file:// 是安全上下文，API 在、但常因权限/焦点 reject）。独立审查 B6。
+  const fallback = () => {
+    const list = $opt('logList');
+    if (list) {
+      const range = document.createRange();
+      range.selectNodeContents(list);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+    done();
+  };
+  const nav: any = navigator;
+  if (nav?.clipboard?.writeText) {
+    nav.clipboard.writeText(text).then(done).catch(fallback);
+  } else {
+    fallback();
+  }
+}
+
+function wireLogs(): void {
+  $opt('btnLogs')?.addEventListener('click', () => (logsOpen ? closeLogs() : openLogs()));
+  $opt('logClose')?.addEventListener('click', closeLogs);
+  $opt('logClear')?.addEventListener('click', clearLogs);
+  $opt('logCopy')?.addEventListener('click', copyLogs);
+  $opt('logOnlyErrors')?.addEventListener('change', renderLogs);
+  // 点遮罩也能关（与其它模态一致的手感）
+  $opt('logModal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement)?.id === 'logModal') closeLogs();
+  });
+  // 独立审查 B8 + 复核 P1-5：Esc 必须挂到 **document** —— 挂在模态元素上时，没有 tabindex
+  // 又不 focus 的话事件根本进不来（其它模态都走 document/window 级）。
+  document.addEventListener('keydown', (e) => {
+    if (logsOpen && (e as KeyboardEvent).key === 'Escape') closeLogs();
+  });
+  applyLogsLang();
+}
+
+function applyLogsLang(): void {
+  const set = (id: string, key: string) => {
+    const el = $opt(id);
+    if (el) el.textContent = tSync(currentLang, key);
+  };
+  set('btnLogs', 'logsButton');
+  const openBtn = $opt('btnLogs');
+  if (openBtn) openBtn.setAttribute('title', tSync(currentLang, 'logsButton'));
+  set('logTitle', 'logsTitle');
+  set('logCopy', 'logsCopy');
+  set('logClear', 'logsClear');
+  set('logOnlyErrorsLabel', 'logsOnlyErrors');
+  const close = $opt('logClose');
+  if (close) close.setAttribute('aria-label', tSync(currentLang, 'logsClose'));
+  // 复核 P2-10：计数/空态文案是 renderLogs 写进去的，切语言后必须重渲染一次，
+  // 否则日志窗停在旧语言直到下一条日志或用户点了筛选。
+  if (logsOpen) renderLogs();
+}
+
+function log(msg: string, record = true) {
   modelStatus.textContent = msg;
+  // 用户要的"所有日志"：状态栏只有一行、下一秒就被覆盖，这里同步送进全局缓冲（background/host），
+  // 面板底部那个按钮展开时才看得到全部。
+  // record=false 用于**来自宿主**的消息（宿主已经记过一遍）：否则同一条会记两次。
+  if (record) recordLog('info', 'panel', msg);
 }
 
 // —— 系统音频不支持·模态提示 ——
@@ -1373,6 +1580,12 @@ async function doStart(): Promise<void> {
     // 「暂停」）。用缓存的 helperInfo 判断会形成死循环 —— 提示"请在助手窗口点启动"，用户去点了、
     // 回来再点「开始」，仍然读到旧的 paused=true。Web 版页面常驻，必然复现。
     await detectHelper(true);
+    // 坑（独立审查 m6）：探测有代次守卫 —— 若这次探测被"更新的那次探测"取代，它会直接
+    // return 且**不回写 helperInfo**，于是明明助手在运行也会弹「没探测到助手」。
+    // 这里再给一次机会，仍为空才报错。
+    if (!helperInfo) {
+      await detectHelper(true);
+    }
     // 产品决定（2026-10-05，**用户澄清后修正**）：能不能开始，看的是"**有没有连上助手**"，
     // 不是"有没有声音"。裁决抽成了纯函数 `evaluateHelperGate`（src/helper-gate.ts），
     // 规则原文与回归测试都在那里 —— 改门卫先改它、再跑 `npm test`。
@@ -1544,6 +1757,8 @@ async function doStart(): Promise<void> {
   // 同上：tab 音源的加载态也在发送 START 的此刻亮出，不等引擎的 STATUS_TEXT
   setHeroLoading(!IS_EXTENSION ? 'loadingModelWeb' : 'loadingModel');
 }
+
+wireLogs();   // 日志窗（默认关闭；点底部按钮展开）的接线
 
 export function triggerStart(): void { void doStart(); }
 btnStart.onclick = () => { void doStart(); };
@@ -1875,9 +2090,6 @@ async function loadTranscript() {
   renderTranscript();
 }
 
-function saveTranscript() {
-  storage.set({ [TRANSCRIPT_KEY]: transcriptEntries });
-}
 
 function renderTranscript() {
   if (transcriptEntries.length === 0) {
@@ -2333,19 +2545,28 @@ onMessageFromHost((msg) => {
       setStatus(msg.status, msg.startedAt);
       break;
     case 'LOG':
-      log(msg.message);
+      log(msg.message, false);
+      break;
+    case 'LOG_APPEND':
+      // 宿主广播的新日志（它自己/引擎/助手那几条）。**必须沿用它的 id/t**：
+      // 上一轮我以为"跳过 source==='panel'"就够了，但 helper/engine 这类来源仍会在面板本地被
+      // 重新盖一个新 id → 按 id 去重永远配不上 → 日志窗照旧一行两遍（复核 P0-1，必现）。
+      if (msg.entry) {
+        pushLocalLog(msg.entry.level || 'info', msg.entry.source || 'app', msg.entry.message || '',
+                     { t: msg.entry.t, id: msg.entry.id });
+      }
       break;
     case 'HELPER_SILENT':
       // 桌面助手没启动/没连上/处于暂停：不是故障——会话照常跑（这个音源此刻就是静音）。
       // 只在日志区提醒一句（**不带**"错误："前缀，它不是错误），不置 Stopped、不弹模态。
-      log(String(msg.message || ''));
+      log(String(msg.message || ''), false);
       break;
     case 'ERROR': {
       // 坑：errorPrefix 的 {m} 是占位符，须手动 replace（与 searchHits 同一套约定）。
       // 又一类坑（复审抓到）：助手侧运行期错误在 helper.helperErrorMessage 里**已经**套过
       // 一次 errorPrefix，这里再套一次就变成"错误：错误：…"。所以先看是否已带前缀。
       const raw = String(msg.message ?? '');
-      log(withErrorPrefix(raw));
+      log(withErrorPrefix(raw), false);
       // 麦克风启动失败升级为模态：授权框没出现就闪退时，这是用户唯一读得到原因的地方
       if (msg.micFailure) showMicErrorModal(String(msg.message || ''));
       setStatus('Stopped');
@@ -2386,7 +2607,21 @@ storage.get('tmspeech_use_punct').then(r => {
 // **音源常驻显示**，探测结果只决定"能不能启动"和提示语（早期"探测到才显示"已废弃，
 // 用户实测在 Web 版里因此找不到这个音源 —— 见 detectHelper 上方注释）。
 void detectHelper();
-sendToHost({ type: 'GET_STATUS' }).then((resp: any) => {
+// 坑（独立审查 M2）：这是模块体顶层，Web 版里它跑在 installWebHost() **之前** —— dispatch
+// 当时没有监听者，promise resolve 成 undefined，locked 于是永远停在 false（面板写"锁定"、
+// 字幕其实已锁，要点两下才能解锁）。所以拿不到响应就重试几次（扩展侧一次就成功，无副作用）。
+function requestStatus(attempt = 0): void {
+  void sendToHost({ type: 'GET_STATUS' }).then((resp: any) => {
+    if (!resp && attempt < 8) {
+      setTimeout(() => requestStatus(attempt + 1), 50);
+      return;
+    }
+    applyStatus(resp);
+  }).catch(() => {});          // 宿主不可用/异常：保持默认状态，别抛未处理 rejection
+}
+requestStatus();
+
+function applyStatus(resp: any): void {
   // 坑：status 缺失（响应异常）时不得调 setStatus——undefined 会落进 else 分支误显 Stopped
   if (resp?.status) setStatus(resp.status, resp.startedAt);
   if (resp?.locked !== undefined) { locked = resp.locked; updateLockUI(); }
@@ -2396,4 +2631,4 @@ sendToHost({ type: 'GET_STATUS' }).then((resp: any) => {
     levels = resp.levels.slice(-LEVEL_BARS);
     if (chkWaveform.checked && lastStatus === 'Running') drawWave();
   }
-}).catch(() => {});
+}

@@ -20,6 +20,7 @@
 import { AsrEngine } from '../asr-engine';
 import { MicCapture, micErrorText } from '../mic-capture';
 import { appendHelperErrorHint, HelperSource, isHelperSilentCode, loadHelperSession } from '../helper';
+import { createLogBuffer } from '../logbus';
 import { emitToPanel, onHostMessage, resolveUrl, storage } from '../platform';
 import { tSync } from '../i18n';
 import { appendTranscript, attachTranscriptTranslation } from '../transcript-store';
@@ -67,6 +68,9 @@ export interface SessionLifecycleHooks {
   // （扩展里 OVERLAY_TOGGLE 只作用于页内叠层，悬浮窗由音源决定开合——Web 没有页内叠层，
   //  若照搬"销毁叠层"的语义，用户取消勾选后只会留下一个空白浮窗）。
   onSubtitlesVisibility?(visible: boolean): void;
+  // 给显示端（字幕浮窗）发一条**常驻提示**：助手暂停/掉线/采集失败的原因。
+  // 扩展侧等价物是 background 直接 sendToFloating({type:'NOTICE'})（用户唯一看得见的界面）。
+  notice?(level: 'info' | 'error', message: string): void;
 }
 let lifeHooks: SessionLifecycleHooks = {};
 export function setSessionLifecycleHooks(h: SessionLifecycleHooks) { lifeHooks = h; }
@@ -77,7 +81,7 @@ function getEngine(): AsrEngine {
       resolveUrl,
       pushMs: WEB_PUSH_MS,
       sink: {
-        log: (message) => emitToPanel({ type: 'LOG', message }),
+        log: (message) => emitLog(message),   // 引擎日志也进日志缓冲（否则日志窗里只有助手那几条）
         toDisplay: (payload) => sendToPeer(payload),
         toPanel: (payload) => {
           const p = payload || {};
@@ -114,7 +118,18 @@ function getEngine(): AsrEngine {
             emitToPanel(p);
           }
           // ERROR：音频注定进不来，收敛成一次可见的停止（同扩展的 cleanupAll）
-          if (p.type === 'ERROR') stopSession();
+          if (p.type === 'ERROR') {
+            // 独立审查 B3-B：引擎自己发的 ERROR 以前既没进日志缓冲、也没给显示端发通知
+            // （扩展侧两件都做），于是 Web 日志窗缺这类错误、浮窗也永远不提示。
+            const text = String(p.message || '');
+            if (text) {
+              logLine('error', 'app', text);
+              noticeToDisplays('error', text);
+            }
+            // B3-A：别让 stopSession 顺手把唯一的显示端关掉（扩展侧有 keepFloatingForNotice）
+            keepSubtitleForNotice = true;
+            stopSession();
+          }
         },
         // 采集彻底起不来（用户关掉屏幕选择器、音频轨异常、模型缺失）→ 立即收敛会话，
         // 否则面板停在"识别中"、浮窗空挂，成为没有任何反馈的幽灵会话。
@@ -129,18 +144,6 @@ function getEngine(): AsrEngine {
 // 幂等——ERROR / 浮窗关闭 / 用户点停止 三条路都会走到这里。
 // 导出给面板用：浮窗失联（被导航走/被浏览器丢弃）时面板也要能收敛整场会话。
 
-// 本页是不是"回环地址上的页面"——判定必须与助手那边的白名单**逐字对齐**（助手用
-// `security.is_loopback_origin`：`localhost` / `localhost.localdomain` 两个字面量，或
-// Python `ipaddress.ip_address(host).is_loopback`，即 IPv4 只有 127.0.0.0/8、IPv6 只有 ::1）。
-// 坑（独立审查抓的）：写宽了比写窄了更糟 —— 把 `0.0.0.0` / `127.1` / `localhost.` / `*.localhost`
-// 也当回环时，助手其实**会拒绝**它们，而这里却因此不给"站点没被放行"的指引，用户只剩静音。
-function isLoopbackPage(): boolean {
-  const host = location.hostname.toLowerCase();
-  if (host === 'localhost' || host === 'localhost.localdomain') return true;
-  if (host === '::1' || host === '[::1]') return true;      // 浏览器给的是带方括号的形式
-  const v4 = host.match(/^127\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  return !!v4 && v4.slice(1).every((part) => Number(part) <= 255);
-}
 
 // 桌面助手音频源：WS 由本宿主持有（面板页就是引擎宿主），PCM 直接喂进识别管道。
 // 令牌从 storage 读——面板配对成功后会写进去，这里不重复探测（避免两处状态不一致）。
@@ -156,13 +159,14 @@ async function startHelperSource(isStale: () => boolean) {
     // 文案要与"只在没有令牌时发送"这一事实一致：别说"没在运行"（用户窗口可能开着），
     // 也别提"暂停"（那由 ERR_PAUSED → helperPaused 那条路负责）；且这是单行日志区，
     // 没有链接可点，别写"在下方链接下载"。
+    logLine('warn', 'helper', tSync(msgLang, 'helperSilentGeneric'));
+    noticeToDisplays('info', tSync(msgLang, 'helperSilentGeneric'));
     emitToPanel({ type: 'HELPER_SILENT', message: tSync(msgLang, 'helperSilentGeneric') });
     return;
   }
   helper = new HelperSource({
     port: session.port,
     token: session.token,
-    source: 'system',
     lang: msgLang,
     // 与扩展端同一条通道：PCM 交给引擎，电平由引擎自己算（不给 helper 开专属通路）
     onPcm: (f32, rate) => getEngine().feedMicChunk(f32, rate),
@@ -171,10 +175,16 @@ async function startHelperSource(isStale: () => boolean) {
       // 属于"连着但不该拆会话"（助手暂停、连上后掉线）——只记日志，不连模型一起拆掉。
       // 清单共用 helper.isHelperSilentCode（别再各写一份，那就是不一致的来源）。
       if (isHelperSilentCode(code)) {
+        logLine('warn', 'helper', message);
+        noticeToDisplays('info', message);
         emitToPanel({ type: 'HELPER_SILENT', message });
         return;
       }
       message = appendHelperErrorHint(message, code, msgLang);
+      logLine('error', 'app', message);
+      noticeToDisplays('error', message);
+      // 同 B3-A：这次错误的原因要留在显示端上，别被随后的 stopSession 关窗吞掉。
+      keepSubtitleForNotice = true;
       emitToPanel({ type: 'ERROR', message });
       stopSession();
     },
@@ -206,7 +216,10 @@ export function stopSession() {
   lifeHooks.onSessionStopped?.();
   // 生命周期绑定（同扩展 cleanupAll 末尾的 closeFloating）：会话结束，字幕显示端
   // 没有继续存在的意义。此前漏了这一步，表现为"停止后浮窗还在那儿挂着"。
-  if (wasRunning) closeSubtitleWindow();
+  // 例外（独立审查 B3-A）：刚发过错误常驻提示时留着它 —— 否则用户只看到"浮窗闪一下就没了"，
+  // 而"让唯一看得见的界面显示原因"正是这条特性的全部意义。用户点一下提示即关。
+  if (wasRunning && !keepSubtitleForNotice) closeSubtitleWindow();
+  keepSubtitleForNotice = false;
 }
 
 export function getSessionStatus() { return status; }
@@ -214,7 +227,34 @@ export function getSessionStatus() { return status; }
 export function isSessionActive(): boolean { return sessionActive; }
 
 // 面板/宿主想让一行文字出现在面板日志区时用它（引擎日志走 sink.log，这是宿主自用的）
-export function emitLog(message: string) { emitToPanel({ type: 'LOG', message }); }
+// —— 全部日志（面板底部「查看所有日志」的数据源）——
+// Web 版里宿主与面板**同一个 JS 上下文**，所以这份缓冲就是唯一真相源：
+// 面板自己的日志经 LOG 消息汇进来，引擎/助手消息在这里直接记录。
+const webLogs = createLogBuffer();
+
+export function emitLog(message: string, level: 'info' | 'warn' | 'error' = 'info',
+                        source = 'engine', meta?: { t?: number; id?: string }) {
+  // 坑（独立审查 B10）：以前只 emitToPanel({type:'LOG'}) —— 面板只把它写进状态栏，
+  // 日志窗开着时**不会实时刷新**（扩展侧走的是 logLine→LOG_APPEND，是实时的）。统一走 logLine。
+  logLine(level, source, String(message == null ? '' : message), meta);
+}
+
+/** 把带级别的日志也广播给面板（日志窗实时追加）。`meta` 沿用调用方身份，理由同 logbus.LogEntry.id。 */
+function logLine(level: 'info' | 'warn' | 'error', source: string, message: string,
+                 meta?: { t?: number; id?: string }) {
+  const entry = webLogs.append(level, source, String(message == null ? '' : message), meta);
+  emitToPanel({ type: 'LOG_APPEND', entry });
+  return entry;
+}
+
+/** 浮窗/页内叠层的常驻提示（与扩展 background 的 NOTICE 契约一致）。 */
+//: 刚发过错误常驻提示 → 收敛会话时**留着**唯一的显示端，让用户读到原因（独立审查 B3-A，
+//: 对应扩展侧的 keepFloatingForNotice）。
+let keepSubtitleForNotice = false;
+
+function noticeToDisplays(level: 'info' | 'error', message: string) {
+  lifeHooks.notice?.(level, message);
+}
 
 // 字幕浮窗的窗口引用由面板（web/panel.ts）用 window.open 建好后交给这里保管：
 // 宿主在会话结束时需要主动关窗，而 panel 侧不该关心"谁负责关窗"这类路由细节。
@@ -270,6 +310,9 @@ export async function preAcquireAudio(source: string): Promise<MediaStream | nul
 
 async function startSession(msg: any) {
   const source = msg.source === 'mic' ? 'mic' : msg.source === 'helper' ? 'helper' : 'system';
+  // 新会话开始：撤掉上一场留下的常驻提示（浮窗是跨会话复用的窗口，独立审查 B2-A）
+  keepSubtitleForNotice = false;
+  noticeToDisplays('info', '');
   // 会话语言：错误文案要用会话启动时的语言（面板切语言后重开会话才变，与扩展一致）
   if (msg.lang) msgLang = msg.lang;
   // 先停干净上一场（含上一场的 getDisplayMedia 轨道），避免两份采集并存
@@ -413,6 +456,20 @@ export function installWebHost() {
           const lock = await readLock();
           return { status, startedAt, locked: lock, levels: levels.slice() };
         })();
+
+      case 'GET_LOGS':
+        return { entries: webLogs.list() };
+
+      case 'CLEAR_LOGS':
+        webLogs.clear();
+        return { ok: true };
+
+      case 'LOG':
+        // 面板把自己的日志送进来（它只有一行状态栏，没有历史）。**沿用它的 id/t**，
+        // 回播时带同一个身份才能在日志窗里去重（独立审查 B1）。
+        logLine(msg.level || 'info', msg.source || 'panel', msg.message || '',
+                { t: msg.t, id: msg.id });
+        return true;
 
       case 'OVERLAY_TOGGLE':
         // Web 版语义是"字幕浮窗开/关"，交给面板执行窗口动作

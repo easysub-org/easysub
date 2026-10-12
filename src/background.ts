@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 hcz1017
 import { t } from './i18n';
+import { createLogBuffer } from './logbus';
 // 字幕记录的读写全部收敛在 transcript-store（与纯 Web 版共用同一份实现）；
 // 这里只需要追加与挂译文两个入口，其余导出留给未来可能用到的地方。
 import { appendTranscript, attachTranscriptTranslation } from './transcript-store';
@@ -64,8 +65,69 @@ let sessionEpoch = 0;
 const LEVEL_SNAPSHOT_MAX = 60;
 let bgLevels: number[] = [];
 
+// —— 全部日志（用户要的"日志区"）：默认不看，面板底部按钮才展开 ——
+// 单一真相源放在 background：面板(popup)、offscreen、浮窗、助手的消息都汇到这里，
+// popup 关掉再打开也能看到历史（节流镜像到 storage.session，SW 被回收也还能捞回来）。
+const bgLogs = createLogBuffer();
+let logFlushTimer: any = null;
+//: 出错时不要把唯一显示端（悬浮字幕窗）关掉——用户得看见原因（"闪一下就没了"曾是最差体验）。
+let keepFloatingForNotice = false;
+
+/** 记一条并广播。`meta`（id/t）用于**沿用调用方的身份** —— 面板自己记过的那条会带着
+ *  同一个 id 回来，去重才命中（否则同一条在日志窗里出现两三遍，独立审查 B1）。 */
+function logLine(level: 'info' | 'warn' | 'error', source: string, message: string,
+                 meta?: { t?: number; id?: string }) {
+  const entry = bgLogs.append(level, source, String(message == null ? '' : message), meta);
+  sendToPopup({ type: 'LOG_APPEND', entry });
+  if (!logFlushTimer) logFlushTimer = setTimeout(flushLogs, 1000);
+  return entry;
+}
+
+function flushLogs() {
+  logFlushTimer = null;
+  try {
+    // 只镜像最后 200 条：storage.session 是给"重开面板还能看到刚才发生了什么"，不是长期档案
+    chrome.storage.session.set({ tmspeech_logs: bgLogs.list().slice(-200) }).catch(() => {});
+  } catch { /* session 存储不可用（老浏览器）：内存里那份仍然能用 */ }
+}
+
+async function restoreLogs() {
+  try {
+    const r = await chrome.storage.session.get('tmspeech_logs');
+    const saved = (r && (r as any).tmspeech_logs) || [];
+    // 独立审查 B11：恢复的条目要**按时间插回正确位置**，不能无脑追加到末尾 —— SW 冷启动后
+    // 可能已经有新日志进来，追加会把顺序弄反，而且超上限时环形裁剪从头部丢的正是这些新日志。
+    const known = new Set(bgLogs.list().map((e) => e.id));
+    const restored = saved.filter((e: any) => e && !known.has(e.id));
+    const merged = [...restored, ...bgLogs.list()].sort((a, b) => (a.t || 0) - (b.t || 0));
+    bgLogs.clear();
+    for (const e of merged) bgLogs.append(e.level || 'info', e.source || 'app', e.message || '', { t: e.t, id: e.id });
+  } catch { /* 读不到就算新会话 */ }
+}
+
+void restoreLogs();
+
 function sendToPopup(msg: any) {
   chrome.runtime.sendMessage(msg).catch(() => {});
+}
+
+//: 浮窗还没连上端口时暂存的提示（独立审查 B5：NOTICE 是一次性的，丢了就永远没有原因了）。
+let pendingNotice: any = null;
+
+/** 给浮窗发常驻提示；窗口/端口还没就绪就先存着，等 onConnect 补发。 */
+function notifyFloating(level: 'info' | 'error', message: string) {
+  const payload = { type: 'NOTICE', level, message };
+  if (!floatingPort) {
+    pendingNotice = payload;
+    return;
+  }
+  sendToFloating(payload);
+}
+
+/** 撤掉浮窗上的常驻提示（新会话开始、或原因已不成立时）。 */
+function clearFloatingNotice() {
+  pendingNotice = null;
+  sendToFloating({ type: 'NOTICE', message: '' });
 }
 
 function sendToTab(tabId: number, msg: any) {
@@ -171,10 +233,20 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onDisconnect.addListener(() => {
       if (floatingPort === port) floatingPort = null;
     });
+    // 独立审查 B5：端口就绪时补发暂存的常驻提示 —— 否则"错误发生在窗口创建/连接之前"
+    // 的那次提示会被静默丢掉，而 cleanupAll 又刻意留了窗口，用户得到一个没有原因的空白浮窗。
+    if (pendingNotice) {
+      sendToFloating(pendingNotice);
+      pendingNotice = null;
+    }
     // 悬浮窗回传：mic PCM 块转发给 offscreen 直接喂管道；开流失败则终止会话
     port.onMessage.addListener((m: any) => {
       if (m?.type === 'MIC_CHUNK') {
         if (!m.audio) return;
+        // 复核 P0-2：只在**当前会话确实是 mic** 时才转发。保留浮窗的例外路径能让旧 mic 采集
+        // 活过会话边界，而 feedMicChunk 不判来源（只判 pipeline 存不存在）→ 会把麦克风
+        // 混进下一场系统音频会话。这里按会话音源门控，双保险。
+        if (sessionSource !== 'mic') return;
         // audio 是 number[]（Port 的 JSON 克隆所致，见 floating.ts 注释），原样中继即可
         try { offscreenPort?.postMessage({ type: 'MIC_CHUNK', audio: m.audio, sampleRate: m.sampleRate }); } catch { /* offscreen 未就绪，丢弃本块 */ }
         return;
@@ -263,11 +335,17 @@ chrome.runtime.onConnect.addListener((port) => {
       // 它不是故障：不惊动悬浮窗、不走 ERROR 的 cleanupAll（那会把模型整场拆掉），
       // 只进面板日志区提醒一句"助手没连上，当前是静音"。
       if (p.type === 'HELPER_SILENT') {
+        // 坑（独立审查 ①②）：以前只发给 popup 的日志行 —— 点「开始」后 popup 必然已关闭，
+        // 而浮窗又刻意不接这类消息，于是"助手暂停/掉线"这类最高频的静音降级**零反馈**。
+        // 现在：进日志 + 给浮窗发一条常驻提示（浮窗是采集时唯一看得见的界面）。
+        logLine('warn', 'helper', p.message);
+        notifyFloating('info', p.message);
         sendToPopup({ type: 'LOG', message: p.message });
       } else if (p.type === 'STATUS_CHANGED' || p.type === 'ERROR' || p.type === 'LEVEL') {
         sendToFloating(p);
       }
       if (p.type === 'STATUS_CHANGED') {
+        if (pipelineStatus !== p.status) logLine('info', 'session', p.status);
         pipelineStatus = p.status;
         // 坑：offscreen 不知道会话何时开始（尤其 SW 重启后 RECONNECT 自愈恢复的
         // Running），首次见到 Running 就地盖章；已有戳（正常 START 路径）不覆盖
@@ -275,6 +353,9 @@ chrome.runtime.onConnect.addListener((port) => {
         persistSession();
         // 附带 startedAt 让已打开的 popup 直接校准计时基准（重开面板不再从 00:00 起）
         sendToPopup({ ...p, startedAt: sessionStartedAt });
+      } else if (p.type === 'LOG') {
+        logLine('info', 'engine', p.message);
+        sendToPopup(p);
       } else if (p.type !== 'SENTENCE_DONE' && p.type !== 'HELPER_SILENT') {
         // 坑：SENTENCE_DONE 不能走这里原样转发——下方盖章块会再发一份带 ts 的，
         // 不排除的话 popup 每句收两条（一条无时标一条有），列表重复。
@@ -282,7 +363,14 @@ chrome.runtime.onConnect.addListener((port) => {
         // 第二条、还带"错误："前缀——它不是故障（独立审查抓的）。
         sendToPopup(p);
       }
-      if (p.type === 'ERROR') cleanupAll();
+      if (p.type === 'ERROR') {
+        // 真故障（设备被拔/助手崩了/休眠唤醒）：先让用户看见原因，**再**收敛会话。
+        // keepFloatingForNotice 让 cleanupAll 不要关掉浮窗 —— 否则用户只看到"闪一下消失"。
+        logLine('error', 'app', p.message);
+        keepFloatingForNotice = true;
+        notifyFloating('error', p.message);
+        cleanupAll();
+      }
       if (p.type === 'SENTENCE_DONE') {
         // 坑：offscreen 发的 SENTENCE_DONE 只带 text 不带 ts——原样转发会让 popup
         // 推 {text, ts:0}，新句在面板里永远不显示时间戳（storage 入库反而是对的）。
@@ -336,7 +424,11 @@ chrome.runtime.onConnect.addListener((port) => {
             }
             captureTabId = reviveTabId;
             const id = captureTabId!;
-            sendToTab(id, { type: 'OVERLAY_TOGGLE', visible: true });
+            // 同导航：复活字幕层也要尊重 overlayVisible（独立审查 m3）
+            chrome.storage.local.get('tmspeech_prefs').then(r => {
+              const prefs = (r['tmspeech_prefs'] as any) || {};
+              sendToTab(id, { type: 'OVERLAY_TOGGLE', visible: prefs.overlayVisible !== false });
+            });
             // 坑：同 START——复活路径也必须把权威锁态推给（可能新建的）字幕层，
             // 否则重连自愈后新层按未锁定样式绘制且无人纠正。
             chrome.storage.local.get(LOCK_KEY).then(r => {
@@ -445,6 +537,10 @@ function cleanupAll() {
   sessionStartedAt = 0; // 会话终结即清开始戳（epoch 失配/STOP/错误清理统一走这里）
   bgLevels = []; // 波形快照随之清空：停止后的面板不再显示已结束会话的电平残留
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  // mic 的采集端在悬浮窗里：下面"保留浮窗看错误"的分支必须先知道本场是不是 mic ——
+  // sessionSource 紧接着就会被重置成 'tab'（复核 P0-2 时正是这里踩了：判断写在重置之后，
+  // 于是麦克风永不停止采集，tsc 还会报"两个类型没有交集"）。
+  const wasMic = sessionSource === 'mic';
   sessionSource = 'tab';
   const tabId = captureTabId;
   pipelineStatus = 'Stopped';
@@ -475,7 +571,23 @@ function cleanupAll() {
   // 生命周期绑定（悬浮窗随会话）：会话停止即关闭悬浮窗——system 模式下它是唯一显示端，
   // 会话结束没有继续存在的意义。closeFloating 会触发 windows.onRemoved，彼时
   // pipelineStatus 已是 Stopped，onRemoved 里的"关窗即停止"守卫自然跳过，不会二次清理。
-  closeFloating();
+  // 例外：刚发了错误提示时留着它，让用户读得到原因（否则"闪一下就消失"）。用户点提示即关窗
+  // （见 overlay 的 onNoticeDismiss）。
+  if (keepFloatingForNotice) {
+    keepFloatingForNotice = false;
+    // 复核 P0-2（真 bug）：留着浮窗时**必须显式停 mic** —— 浮窗就是麦克风的采集端，
+    // 会话已经 Stopped 却没人发 MIC_CAPTURE_STOP，麦克风会一直热着（指示灯常亮），
+    // 而且下一场 system/helper 会话复用同一窗口时，旧 mic 的 MIC_CHUNK 会被喂进新管道
+    // （系统音频里混进麦克风声音）。tab 会话没有浮窗，但 pendingNotice 也要清掉，
+    // 否则以后"不走 START 就开浮窗"的路径会把上一条旧错误回播出去（复核 P2-9）。
+    pendingNotice = null;
+    if (wasMic) sendToFloating({ type: 'MIC_CAPTURE_STOP' });
+  } else {
+    closeFloating();
+  }
+  // 独立审查 B2-B：保留浮窗时也必须把终态推给它 —— 否则被留下的窗口仍显示"运行中"的
+  // 停止按钮与旧加载文案（它会跨会话复用），用户点一下才触发第二次 cleanupAll 关掉。
+  sendToFloating({ type: 'STATUS_CHANGED', status: 'Stopped' });
   sendToPopup({ type: 'STATUS_CHANGED', status: 'Stopped' });
 }
 
@@ -597,10 +709,22 @@ async function startRecognition(msg: any, respond: () => void) {
     captureTabId = source === 'tab' ? (msg.tabId || null) : null;
     sessionStartedAt = Date.now(); // START 成功即盖会话开始戳，计时基准唯一事实源
     persistSession();
+    // 独立审查 B2-A：新会话开始 → 上一场留下的错误提示必须撤掉。浮窗是跨会话复用的
+    // （openFloating 命中已有窗口就复用），否则用户会对着一条已经不成立的错误等到开口说话。
+    clearFloatingNotice();
     // 用户确认：音源为系统/麦克风 → 自动开悬浮字幕窗（无标签页可注入，悬浮窗是唯一显示端）；
     // 音源为标签页 → 关闭悬浮窗，字幕回到浏览器内叠层。失败仅记日志，不阻断识别启动。
     if (source !== 'tab') {
-      openFloating().catch((e) => console.log('[TM BG] 自动打开悬浮字幕窗失败:', e));
+      // 坑（跨仓审查 P1，回归）：**麦克风的采集端就住在悬浮字幕窗里** —— Chrome 禁止 offscreen
+      // 调 getUserMedia，所以 mic 的 PCM 只能由浮窗里的 floating.ts 采集后回传。于是这个窗口
+      // 对 mic 是"采集设备"而不仅是"显示端"：如果因为用户取消了「显示字幕」就不开窗，
+      // 会话会显示「识别中」却永远没有音频、也没有任何报错（本仓最忌讳的幽灵会话）。
+      // system/helper 的音频在 offscreen 里采，浮窗只是显示端，才受这个勾选影响。
+      if (source === 'mic' || msg.overlayVisible !== false) {
+        openFloating().catch((e) => console.log('[TM BG] 自动打开悬浮字幕窗失败:', e));
+      } else {
+        closeFloating();
+      }
       // mic：悬浮窗已在（二次启动复用旧窗，不会有新的 onConnect）→ 直接下采集令；
       // 新开窗口则等 onConnect 补发。floating 侧对重复指令幂等，双发无害。
       if (source === 'mic' && floatingPort) sendToFloating({ type: 'MIC_CAPTURE_START' });
@@ -698,6 +822,22 @@ async function startRecognition(msg: any, respond: () => void) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'GET_LOGS') {
+    sendResponse({ entries: bgLogs.list() });
+    return;
+  }
+  if (msg.type === 'CLEAR_LOGS') {
+    bgLogs.clear();
+    flushLogs();
+    sendResponse({ ok: true });
+    return;
+  }
+  if (msg.type === 'LOG') {
+    // 面板/浮窗把各自那一条日志送来汇合（它们自己没有历史）。**沿用它的 id/t**：
+    // 面板本地已经记过一份，回播时带同一个 id 才能在日志窗里去重（独立审查 B1）。
+    logLine(msg.level || 'info', msg.source || 'panel', msg.message || '', { t: msg.t, id: msg.id });
+    return;
+  }
   if (msg.type === 'TRANSLATE_TEST') {
     // 面板"测试翻译"：转发给 offscreen（无 storage 权限，纯中继），用 id 关联应答。
     // 没在识别时 offscreen 文档不存在（offscreenPort 为空），先建文档等端口连上再发。
@@ -778,7 +918,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'OVERLAY_TOGGLE') {
-    if (captureTabId) sendToTab(captureTabId, { type: 'OVERLAY_TOGGLE', visible: msg.visible });
+    if (captureTabId) {
+      sendToTab(captureTabId, { type: 'OVERLAY_TOGGLE', visible: msg.visible });
+    } else {
+      // 非 tab 音源（系统音频/麦克风/桌面助手）没有可注入的叠层，唯一显示端就是悬浮窗：
+      // 这个勾选框必须真的能开关它，否则就是"点了没反应"（独立审查 M1）。
+      // **例外：mic 会话不能关**（复核 P2-8）—— 浮窗就是麦克风的采集端，关窗会被
+      // handleFloatingClosed 当成"用户关窗即停"处理（静默结束整场识别）。mic 想让字幕
+      // 消失目前只能停会话，这一点写进面板的音源提示里。
+      if (msg.visible) openFloating().catch((e) => console.log('[TM BG] 打开悬浮字幕窗失败:', e));
+      else if (sessionSource !== 'mic') closeFloating();
+    }
   }
 
   if (msg.type === 'LOCK_TOGGLE') {
@@ -905,9 +1055,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (!already) {
       await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
     }
-    sendToTab(tabId, { type: 'OVERLAY_TOGGLE', visible: true });
+    // 坑（独立审查 m3）：以前无条件 visible:true —— 用户"隐藏字幕"的选择会在页面导航后
+    // 被静默撤销，而 storage 里的 overlayVisible 仍是 false（勾选态与实际显示分叉）。
     chrome.storage.local.get('tmspeech_prefs').then(r => {
       const prefs = (r['tmspeech_prefs'] as any) || {};
+      sendToTab(tabId, { type: 'OVERLAY_TOGGLE', visible: prefs.overlayVisible !== false });
       if (prefs.fontSize) sendToTab(tabId, { type: 'SET_FONT_SIZE', fontSize: prefs.fontSize });
     });
     if (offscreenPort) offscreenPort.postMessage({ type: 'RESEND_CURRENT_TEXT' });

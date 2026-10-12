@@ -783,3 +783,37 @@ body[data-mode="light"] .unsup-card { box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2)
   font-size: 12px;
   margin: 6px 0 0;
 }
+
+/* —— 日志窗（默认关闭；点底部「查看所有日志」才展开的窗中窗）——
+   样式刻意复用其它窗中窗的类与主题变量（.unsup-mask/.unsup-card/.unsup-head/.unsup-btn +
+   --surface/--border/--text/--text2/--accent），这样深浅色与各主题色板自动跟随，
+   不会出现"同一个面板里两种风格"。 */
+.log-entry { display: flex; margin: 4px 0 0; }
+.log-open-btn { flex: 0 0 auto; }
+.log-card { max-width: 520px; }
+.log-icon { color: var(--text2); }
+.log-count { margin-left: auto; font: 400 10.5px/1.4 system-ui, sans-serif; color: var(--text2); }
+.log-close { padding: 2px 6px; }
+.log-tools { display: flex; align-items: center; gap: 6px; }
+.log-filter { display: flex; align-items: center; gap: 4px; margin-right: auto;
+  font: 400 11px/1.4 system-ui, sans-serif; color: var(--text2); cursor: pointer; }
+.log-tool-btn { flex: 0 0 auto; }
+.log-list {
+  min-height: 120px; max-height: 46vh; overflow: auto; padding: 8px 9px;
+  background: var(--surface-input); border: 1px solid var(--border); border-radius: 8px;
+  font: 400 11px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text); white-space: pre-wrap; word-break: break-all;
+}
+.log-line { display: block; }
+.log-line.warn { color: #b45309; }
+.log-line.error { color: #dc2626; }
+body[data-mode="dark"] .log-line.warn { color: #fbbf24; }
+body[data-mode="dark"] .log-line.error { color: #f87171; }
+.log-line .log-src { color: var(--text2); }
+.log-empty { color: var(--text2); font-style: italic; }
+
+/* 注：`.overlay-notice`（浮窗顶部常驻提示）的样式**不在这里** —— 悬浮字幕窗只加载
+   `subtitle-shell.css`，写在面板样式表里等于没样式（独立审查 B4）。见该文件同名片段的注释。 */
+/* 日志窗刻意置于其它窗中窗之上：它是用户主动打开的"查看全部"，同 z-index 时会被后声明的
+   模态（unsup/pair/micErr）盖住，而它在 DOM 里最靠前（独立审查 B8）。 */
+#logModal { z-index: 70; }

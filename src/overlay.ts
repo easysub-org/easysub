@@ -28,6 +28,8 @@ export interface OverlayOptions {
   // 纯 Web 版的字幕浮窗与面板是**两个窗口**，chrome 消息不存在，必须换成跨窗口通道，
   // 否则浮窗里点锁定面板毫无反应（静默失效）。
   onLockChanged?: (locked: boolean) => void;
+  /** 常驻提示被用户点掉后的收尾（悬浮窗用它"会话没在跑就关窗"，别留一个空窗）。 */
+  onNoticeDismiss?: () => void;
 }
 
 const BG_MODES: OverlayBgMode[] = ['glass', 'solid', 'outline'];
@@ -59,6 +61,7 @@ export class Overlay {
   private fill = false;
   private absoluteFill = false;
   private onLockChanged: ((locked: boolean) => void) | null;
+  private onNoticeDismiss: (() => void) | null = null;
 
   private overlay: HTMLDivElement | null = null;
   private prevEl: HTMLDivElement | null = null;
@@ -79,6 +82,8 @@ export class Overlay {
   private reviewOpen = false;
   private reviewCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private _lang = 'zh_CN';
+  /** 常驻提示元素（助手暂停/掉线/采集失败的**原因**）。 */
+  private noticeEl: HTMLDivElement | null = null;
   private _lookbackEnabled = true;
   private _latencyEnabled = true;
   private _overlayBgMode: OverlayBgMode = 'glass';
@@ -103,6 +108,7 @@ export class Overlay {
     this.fill = options.fill === true;
     this.absoluteFill = options.absoluteFill === true;
     this.onLockChanged = options.onLockChanged ?? null;
+    this.onNoticeDismiss = options.onNoticeDismiss ?? null;
     this.mountTarget = options.mountTarget
       || (() => (this.trackFullscreen ? this.fullscreenMount() : document.body));
     if (this.trackFullscreen) {
@@ -302,7 +308,14 @@ export class Overlay {
         this.setOverlayText(msg.prev || '', msg.current || '');
         break;
       case 'TEXT_CHANGED':
+        // 真有字幕了 → 说明"没声音"的那条提示已经过期，撤掉（否则一直挂在顶部是噪音）
+        if (msg.text) this.clearNotice();
         this.setText(msg.text);
+        break;
+      case 'NOTICE':
+        // 坑（独立审查 ①②）：助手暂停/掉线/采集失败的原因以前只发 popup 的日志行，而点
+        // 「开始」后 popup 必然已关闭 —— 用户唯一看得见的浮窗零反馈。这条消息就是那份原因。
+        this.setNotice(msg.level === 'error' ? 'error' : 'info', String(msg.message || ''));
         break;
       case 'STATUS_TEXT':
         // 状态文案（正在加载模型 / 正在等待音频 / 请选择共享屏幕）与字幕文本分流：
@@ -816,6 +829,45 @@ export class Overlay {
   private scheduleSave() {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.saveState(), 200);
+  }
+
+  /** 常驻提示：显示"当前为什么没有声音/已经停了"。点一下即关。 */
+  setNotice(level: 'info' | 'error', message: string): void {
+    if (!this.overlay || !this.overlay.isConnected) {
+      // 叠层还没建（浮窗刚打开）：不主动 create——那会画出一个空叠层；
+      // 提示随下一次消息再来。
+      return;
+    }
+    if (!message) {
+      this.clearNotice();
+      return;
+    }
+    if (!this.noticeEl || !this.noticeEl.isConnected) {
+      const el = document.createElement('div');
+      el.className = 'overlay-notice';
+      el.title = tSync(this._lang, 'noticeDismiss');
+      // 复核 P1-3：锁定态下叠层整体是 pointer-events:none（见本文件 lockBtn/reviewBtn 的同款处理），
+      // 提示不显式开 auto 的话它的 click 永远不触发 —— "点这里关掉"就是句假话。
+      el.style.pointerEvents = 'auto';
+      el.addEventListener('click', () => {
+        this.clearNotice();
+        // 复核 P1-4：会话已经停了、窗口是被刻意留下的 —— 点掉提示后如果什么都不做，
+        // 用户会面对一个空浮窗 + 置灰的停止按钮、窗内没有关闭入口。宿主借这个回调收尾
+        // （悬浮窗的实现是"会话没在跑就关窗"）。
+        this.onNoticeDismiss?.();
+      });
+      this.overlay.appendChild(el);
+      this.noticeEl = el;
+    }
+    this.noticeEl.className = 'overlay-notice' + (level === 'error' ? ' error' : '');
+    this.noticeEl.textContent = message;
+  }
+
+  clearNotice(): void {
+    if (this.noticeEl) {
+      this.noticeEl.remove();
+      this.noticeEl = null;
+    }
   }
 
   private setText(text: string) {

@@ -366,7 +366,7 @@ export class HelperSource {
   private sampleRate = HELPER_SAMPLE_RATE;
 
   constructor(opts: HelperSourceOptions) {
-    this.opts = { source: 'system', ...opts };
+    this.opts = { ...opts };
   }
 
   start(): void {
@@ -390,7 +390,10 @@ export class HelperSource {
       this.opened = true;
       this.log('已连接，请求开始采集');
       try {
-        ws.send(JSON.stringify({ type: 'start', source: this.opts.source || 'system' }));
+        // 坑（独立审查 ③）：以前恒发 source:'system' —— 助手侧"消息里的 source 优先"，于是
+        // `easysub-helper --no-gui --source mic` 实际采的却是系统音频（横幅还写着"麦克风"）。
+        // 音源交给助手自己的 default_source/_capture_source 决定，页面不替用户做选择。
+        ws.send(JSON.stringify({ type: 'start' }));
       } catch { /* 刚打开就断开：下面的 onclose 会报错 */ }
     };
     ws.onmessage = (ev) => this.handleMessage(ev);
@@ -436,7 +439,17 @@ export class HelperSource {
           // 优先用页面自己的 i18n 按稳定 code 渲染（助手带的 message 是桌面端语言的兜底）。
           // 例：助手窗口处于暂停 → code='paused' → 页面按自己的语言说"去助手窗口点启动"。
           const code = String(msg.code || 'error');
-          this.opts.onError?.(helperErrorMessage(code, String(msg.message || ''), this.opts.lang || 'zh_CN'), code);
+          // 坑（遗留清单核实 #3）：助手在协议里带了 `fatal`，页面却从来没读 ——
+          // 于是助手明确标了 `fatal: false` 的可恢复提示（例如 `bad_message`，只是协议漂移）
+          // 也会走 ERROR 分支，把整场识别连模型一起拆掉。尊重助手自己的判断，
+          // 静音清单只当**老版本助手**（不发 fatal）时的兜底。
+          const recoverable = msg.fatal === false;
+          // 可恢复时用助手自己那句（准确）而不是把 bad_message 硬套成"暂停"文案；
+          // 路由用的 code 换成静音类，让上层只记日志 + 提示、不拆会话。
+          const text = recoverable
+            ? (String(msg.message || '') || helperErrorMessage(code, '', this.opts.lang || 'zh_CN'))
+            : helperErrorMessage(code, String(msg.message || ''), this.opts.lang || 'zh_CN');
+          this.opts.onError?.(text, recoverable ? 'paused' : code);
           break;
         }
         default:

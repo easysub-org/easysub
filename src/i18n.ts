@@ -220,6 +220,20 @@ const strings: Record<string, Record<string, string>> = {
     // 无「麦克风设备」选择项：设备由 Chrome 授权弹窗选择并记住，扩展内不重复该 UI
     sourceMic: '麦克风',
     sourceHelper: '桌面助手（实验性）',
+    // —— 日志窗（默认关闭：点面板底部的「查看所有日志」才展开）——
+    logHelperProbe: '探测桌面助手：端口 {port}｜已配对 {paired}｜助手暂停 {paused}｜版本 {version}｜协议 {api}',
+    logHelperProbeNone: '未探测到桌面助手（试过记住的端口与 8790–8810）',
+    logsButton: '查看所有日志',
+    logsTitle: '全部日志',
+    logsCopy: '复制全部',
+    logsCopied: '已复制 ✓',
+    logsClear: '清空全部',
+    logsClose: '关闭',
+    logsEmpty: '暂无日志',
+    logsNoMatch: '没有符合条件的日志（取消勾选「只看错误/警告」可看全部）',
+    logsOnlyErrors: '只看错误/警告',
+    logsCount: '共 {n} 条',
+    noticeDismiss: '点这里关掉这条提示',
     helperReleases: '本机助手是为了方便获取音频而开发的独立小程序（实验性）——浏览器拿不到的整机声音由它来采集。下载/更新在这里：',
     sourceHintHelper: '本机助手为方便获取音频而生：整机声音都能识别，不用弹屏幕共享选择器（macOS 14.2+ 首次会要一次「屏幕与系统音频录制」授权）。使用它需要助手正在本机运行、并完成过一次配对；助手开着但处于「暂停」时也可以开始——那时这条音源是静音，识别照常，在助手窗口点「启动」就直接出声。',
     helperPairTitle: '与桌面助手配对',
@@ -235,7 +249,7 @@ const strings: Record<string, Record<string, string>> = {
     // 配对框里没填码就点「配对并开始」（以前是静默 return，按钮像坏了——全盲审查指出）
     helperPairEmptyCode: '请先填入助手窗口里显示的 6 位配对码',
     helperPairErrGeneric: '配对失败：{m}',
-    helperPairErrNetwork: '连不上桌面助手：请确认助手窗口已打开（窗口底部日志里有「正在监听」字样）。注意：助手处于「暂停」也可以配对，不必先点「启动」。',
+    helperPairErrNetwork: '连不上桌面助手：请确认助手窗口已打开（看它**状态行**：会显示「已暂停（服务运行中，连接不断）· 端口 N」，别去底部日志里找「正在监听」，那行会被顶出去）。注意：助手处于「暂停」也可以配对，不必先点「启动」。',
     helperNotFound: '没探测到桌面助手，无法配对。请确认助手窗口已打开（它的状态行会显示「已暂停（服务运行中，连接不断）· 端口 N」或「正在采集 · … · 端口 N」），再重新提交。如果你用过 --port（或助手跑在 8790–8810 之外），请先关掉本框、点「开始」——离线说明框里有一个「助手端口」输入，填上助手状态行里的端口即可。还没安装助手的话：同样关掉本框 → 再点一次「开始」，按说明框里的链接下载并启动。',
     // 助手窗口的「启动/暂停」总开关默认是暂停：这不是故障，是等用户去按一下。
     // 点「启动」后 server 会直接向已连客户端广播真实 PCM（无需重试、无需重新点开始）
@@ -248,7 +262,7 @@ const strings: Record<string, Record<string, string>> = {
     helperSilentGeneric: '尚未连接到桌面助手（没启动，或还没配对）：桌面助手音源此刻是静音，识别照常进行。要采整机声音，请启动助手，再在面板里点「开始」——会弹出配对框，把助手窗口里的 6 位码填进去即可；若本场识别已经在跑，需先停止、再重新点「开始」才会弹框。',
     // —— 助手没连上就不许开始（用户原话：软件都没打开、根本没连接，点开始还能给启动？）——
     helperOfflineTitle: '本机助手没在运行',
-    helperOfflineBody: '「桌面助手」这条音源要靠本机运行的助手软件采集音频：没连上它就没有音频可识别，所以这次没有开始。请先打开助手（它的状态行会显示「已暂停（服务运行中，连接不断）· 端口 N」或「正在采集 · …」），再回到这里点「开始」。',
+    helperOfflineBody: '「桌面助手」这条音源要靠本机运行的助手软件采集音频：没连上它就没有音频可识别，所以这次没有开始。请先打开助手（它的状态行会显示「已暂停（服务运行中，连接不断）· 端口 N」或「正在采集 · …」），再回到这里点「开始」。**如果这个页面是 https 打开的**，浏览器可能直接禁止它连 http://127.0.0.1（混合内容限制，Firefox/Safari 尤甚）——那就换成 http://localhost 打开本页，或改用浏览器扩展版。',
     helperPortLabel: '助手端口',
     helperPortRetry: '用这个端口再试一次',
     helperPortHint: '只有你手动给助手指定过端口（--port）时才需要填：助手状态行里那个「端口 N」就是它。默认不用填。',
@@ -504,6 +518,20 @@ const strings: Record<string, Record<string, string>> = {
     // device and remembers it, so the extension does not duplicate that UI.
     sourceMic: 'Microphone',
     sourceHelper: 'Desktop helper (experimental)',
+    // —— log window (hidden by default; opened from the button at the bottom) ——
+    logHelperProbe: 'helper probe: port {port} | paired {paired} | paused {paused} | version {version} | api {api}',
+    logHelperProbeNone: 'no desktop helper found (tried the remembered port and 8790-8810)',
+    logsButton: 'View all logs',
+    logsTitle: 'All logs',
+    logsCopy: 'Copy all',
+    logsCopied: 'Copied ✓',
+    logsClear: 'Clear all',
+    logsClose: 'Close',
+    logsEmpty: 'No logs yet',
+    logsNoMatch: 'No matching entries (untick "Warnings/errors only" to see all)',
+    logsOnlyErrors: 'Warnings/errors only',
+    logsCount: '{n} entries',
+    noticeDismiss: 'click to dismiss',
     helperReleases: 'The helper is a small separate program built to make audio capture easy (experimental) — it captures the whole-machine sound that the browser cannot. Download or update it here:',
     sourceHintHelper: 'The local helper exists to make audio capture easy: whole-machine sound, no screen-sharing picker (on macOS 14.2+ the first run asks once for Screen & System Audio Recording). Using it requires the helper to be running on this machine and paired once; if it is running but paused you can still start — this source is silent then and transcription keeps going, and pressing "Start" in its window brings the audio in.',
     helperPairTitle: 'Pair with the desktop helper',
@@ -518,7 +546,7 @@ const strings: Record<string, Record<string, string>> = {
     helperPairErrNoCode: 'The helper has no valid pair code right now — check the helper window',
     helperPairEmptyCode: 'Enter the 6-character pair code shown in the helper window first',
     helperPairErrGeneric: 'Pairing failed: {m}',
-    helperPairErrNetwork: 'Cannot reach the desktop helper — make sure its window is open (the bottom log says "listening"). Note: the helper may be paused, you can still pair without pressing Start.',
+    helperPairErrNetwork: 'Cannot reach the desktop helper - make sure its window is open (check its status line: "paused (service up, connection kept) - port N"; do not look for "listening" in the bottom log, it scrolls away). Note: the helper may be paused, you can still pair without pressing Start.',
     helperNotFound: 'No desktop helper was detected, so pairing is not possible. Make sure its window is open (its status line shows "paused (service up, connection kept) · port N" or "capturing · ... · port N"), then submit the code again. If you started the helper with --port (or it runs outside 8790-8810), close this box and press Start: the offline dialog has a "helper port" field where you can type the port from the helper status line. Not installed yet? Close this box, press Start again and follow the download link in the dialog.',
     helperPaused: 'The desktop helper window is paused — press "Start" in its window to begin hearing audio (nothing else needed; what has been transcribed so far is unaffected)',
     helperWsClosed: 'Disconnected from the desktop helper — first check that its window is still running, then stop this session and press Start again to reconnect',
@@ -527,7 +555,7 @@ const strings: Record<string, Record<string, string>> = {
     helperSilentGeneric: 'Not connected to the desktop helper (it is not running, or this browser is not paired yet): this source is silent right now and transcription keeps working. To capture whole-machine sound, start the helper, then press Start in the panel — a pairing box appears, where you enter the 6-character code shown in the helper window; if a session is already running, stop it and press Start again to get that box.',
     // — the helper must be connected before a session may start (user's own words) —
     helperOfflineTitle: 'The desktop helper is not running',
-    helperOfflineBody: 'The "desktop helper" source captures audio through a helper app running on this machine: with no connection there is nothing to transcribe, so this start was not performed. Open the helper first (its status line shows "paused (service up, connection kept) - port N" or "capturing - ... - port N"), then come back and press Start.',
+    helperOfflineBody: 'The "desktop helper" source captures audio through a helper app running on this machine: with no connection there is nothing to transcribe, so this start was not performed. Open the helper first (its status line shows "paused (service up, connection kept) - port N" or "capturing - ... - port N"), then come back and press Start. **If this page is served over https**, the browser may refuse to connect to http://127.0.0.1 at all (mixed content; Firefox/Safari especially) - open the page via http://localhost instead, or use the browser extension.',
     helperPortLabel: 'Helper port',
     helperPortRetry: 'Retry with this port',
     helperPortHint: 'Only needed if you started the helper with an explicit --port: it is the "port N" in the helper status line. Nothing to fill in normally.',
