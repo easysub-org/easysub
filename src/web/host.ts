@@ -20,6 +20,7 @@
 import { AsrEngine } from '../asr-engine';
 import { MicCapture, micErrorText } from '../mic-capture';
 import { appendHelperErrorHint, HelperSource, isHelperSilentCode, loadHelperSession } from '../helper';
+import { createLogBuffer } from '../logbus';
 import { emitToPanel, onHostMessage, resolveUrl, storage } from '../platform';
 import { tSync } from '../i18n';
 import { appendTranscript, attachTranscriptTranslation } from '../transcript-store';
@@ -67,6 +68,9 @@ export interface SessionLifecycleHooks {
   // （扩展里 OVERLAY_TOGGLE 只作用于页内叠层，悬浮窗由音源决定开合——Web 没有页内叠层，
   //  若照搬"销毁叠层"的语义，用户取消勾选后只会留下一个空白浮窗）。
   onSubtitlesVisibility?(visible: boolean): void;
+  // 给显示端（字幕浮窗）发一条**常驻提示**：助手暂停/掉线/采集失败的原因。
+  // 扩展侧等价物是 background 直接 sendToFloating({type:'NOTICE'})（用户唯一看得见的界面）。
+  notice?(level: 'info' | 'error', message: string): void;
 }
 let lifeHooks: SessionLifecycleHooks = {};
 export function setSessionLifecycleHooks(h: SessionLifecycleHooks) { lifeHooks = h; }
@@ -144,6 +148,8 @@ async function startHelperSource(isStale: () => boolean) {
     // 文案要与"只在没有令牌时发送"这一事实一致：别说"没在运行"（用户窗口可能开着），
     // 也别提"暂停"（那由 ERR_PAUSED → helperPaused 那条路负责）；且这是单行日志区，
     // 没有链接可点，别写"在下方链接下载"。
+    logLine('warn', 'helper', tSync(msgLang, 'helperSilentGeneric'));
+    noticeToDisplays('info', tSync(msgLang, 'helperSilentGeneric'));
     emitToPanel({ type: 'HELPER_SILENT', message: tSync(msgLang, 'helperSilentGeneric') });
     return;
   }
@@ -158,10 +164,14 @@ async function startHelperSource(isStale: () => boolean) {
       // 属于"连着但不该拆会话"（助手暂停、连上后掉线）——只记日志，不连模型一起拆掉。
       // 清单共用 helper.isHelperSilentCode（别再各写一份，那就是不一致的来源）。
       if (isHelperSilentCode(code)) {
+        logLine('warn', 'helper', message);
+        noticeToDisplays('info', message);
         emitToPanel({ type: 'HELPER_SILENT', message });
         return;
       }
       message = appendHelperErrorHint(message, code, msgLang);
+      logLine('error', 'app', message);
+      noticeToDisplays('error', message);
       emitToPanel({ type: 'ERROR', message });
       stopSession();
     },
@@ -201,7 +211,28 @@ export function getSessionStatus() { return status; }
 export function isSessionActive(): boolean { return sessionActive; }
 
 // 面板/宿主想让一行文字出现在面板日志区时用它（引擎日志走 sink.log，这是宿主自用的）
-export function emitLog(message: string) { emitToPanel({ type: 'LOG', message }); }
+// —— 全部日志（面板底部「查看所有日志」的数据源）——
+// Web 版里宿主与面板**同一个 JS 上下文**，所以这份缓冲就是唯一真相源：
+// 面板自己的日志经 LOG 消息汇进来，引擎/助手消息在这里直接记录。
+const webLogs = createLogBuffer();
+
+export function emitLog(message: string, level: 'info' | 'warn' | 'error' = 'info',
+                        source = 'engine') {
+  webLogs.append(level, source, String(message == null ? '' : message));
+  emitToPanel({ type: 'LOG', message });
+}
+
+/** 把带级别的日志也广播给面板（日志窗实时追加）。 */
+function logLine(level: 'info' | 'warn' | 'error', source: string, message: string) {
+  const entry = webLogs.append(level, source, String(message == null ? '' : message));
+  emitToPanel({ type: 'LOG_APPEND', entry });
+  return entry;
+}
+
+/** 浮窗/页内叠层的常驻提示（与扩展 background 的 NOTICE 契约一致）。 */
+function noticeToDisplays(level: 'info' | 'error', message: string) {
+  lifeHooks.notice?.(level, message);
+}
 
 // 字幕浮窗的窗口引用由面板（web/panel.ts）用 window.open 建好后交给这里保管：
 // 宿主在会话结束时需要主动关窗，而 panel 侧不该关心"谁负责关窗"这类路由细节。
@@ -400,6 +431,18 @@ export function installWebHost() {
           const lock = await readLock();
           return { status, startedAt, locked: lock, levels: levels.slice() };
         })();
+
+      case 'GET_LOGS':
+        return { entries: webLogs.list() };
+
+      case 'CLEAR_LOGS':
+        webLogs.clear();
+        return { ok: true };
+
+      case 'LOG':
+        // 面板把自己的日志送进来（它只有一行状态栏，没有历史）
+        logLine(msg.level || 'info', msg.source || 'panel', msg.message || '');
+        return true;
 
       case 'OVERLAY_TOGGLE':
         // Web 版语义是"字幕浮窗开/关"，交给面板执行窗口动作

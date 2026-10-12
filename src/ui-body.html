@@ -394,9 +394,32 @@
 
   <div class="status-bar" id="modelStatus"></div>
 
+  <!-- 日志窗入口：默认不看日志；点了才在面板里弹出"窗中窗"（带复制全部/清空全部）。
+       设计依据（用户原话）："加一个日志区记录所有日志，不过默认关闭，只有点击最下面的
+       按钮查看所有日志时打开一个窗中窗才能看到，有复制全部和清空全部" -->
+  <div class="log-entry">
+    <button type="button" class="log-btn" id="btnLogs"></button>
+  </div>
+
   <!-- 子面板遮罩（仅 Web 整页显示，panel.ts 按 IS_EXTENSION 门控）：热词等 .subpanel 在整页里
        是居中小卡，垫一层灰底压暗页面其余内容、突出焦点。扩展弹窗里 .subpanel 本就 inset:0
        铺满整窗、遮罩会被完全盖住，因此扩展侧不显示（节点存在但恒 hidden）。 -->
+  <div class="log-mask" id="logModal" hidden>
+    <div class="log-box" role="dialog" aria-modal="true">
+      <div class="log-head">
+        <span class="log-title" id="logTitle"></span>
+        <span class="log-count" id="logCount"></span>
+        <button type="button" class="icon-btn" id="logClose" aria-label="close">✕</button>
+      </div>
+      <div class="log-tools">
+        <label class="log-filter"><input type="checkbox" id="logOnlyErrors"><span id="logOnlyErrorsLabel"></span></label>
+        <button type="button" class="log-btn" id="logCopy"></button>
+        <button type="button" class="log-btn" id="logClear"></button>
+      </div>
+      <div class="log-list" id="logList"></div>
+    </div>
+  </div>
+
   <div class="subpanel-backdrop" id="subpanelBackdrop" hidden></div>
 
   <!-- 热词编辑·窗中窗（子面板浮层）：absolute 盖在弹出窗上，随 .container 定位 -->

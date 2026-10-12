@@ -79,6 +79,8 @@ export class Overlay {
   private reviewOpen = false;
   private reviewCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private _lang = 'zh_CN';
+  /** 常驻提示元素（助手暂停/掉线/采集失败的**原因**）。 */
+  private noticeEl: HTMLDivElement | null = null;
   private _lookbackEnabled = true;
   private _latencyEnabled = true;
   private _overlayBgMode: OverlayBgMode = 'glass';
@@ -302,7 +304,14 @@ export class Overlay {
         this.setOverlayText(msg.prev || '', msg.current || '');
         break;
       case 'TEXT_CHANGED':
+        // 真有字幕了 → 说明"没声音"的那条提示已经过期，撤掉（否则一直挂在顶部是噪音）
+        if (msg.text) this.clearNotice();
         this.setText(msg.text);
+        break;
+      case 'NOTICE':
+        // 坑（独立审查 ①②）：助手暂停/掉线/采集失败的原因以前只发 popup 的日志行，而点
+        // 「开始」后 popup 必然已关闭 —— 用户唯一看得见的浮窗零反馈。这条消息就是那份原因。
+        this.setNotice(msg.level === 'error' ? 'error' : 'info', String(msg.message || ''));
         break;
       case 'STATUS_TEXT':
         // 状态文案（正在加载模型 / 正在等待音频 / 请选择共享屏幕）与字幕文本分流：
@@ -816,6 +825,36 @@ export class Overlay {
   private scheduleSave() {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.saveState(), 200);
+  }
+
+  /** 常驻提示：显示"当前为什么没有声音/已经停了"。点一下即关。 */
+  setNotice(level: 'info' | 'error', message: string): void {
+    if (!this.overlay || !this.overlay.isConnected) {
+      // 叠层还没建（浮窗刚打开）：不主动 create——那会画出一个空叠层；
+      // 提示随下一次消息再来。
+      return;
+    }
+    if (!message) {
+      this.clearNotice();
+      return;
+    }
+    if (!this.noticeEl || !this.noticeEl.isConnected) {
+      const el = document.createElement('div');
+      el.className = 'overlay-notice';
+      el.title = tSync(this._lang, 'noticeDismiss');
+      el.addEventListener('click', () => this.clearNotice());
+      this.overlay.appendChild(el);
+      this.noticeEl = el;
+    }
+    this.noticeEl.className = 'overlay-notice' + (level === 'error' ? ' error' : '');
+    this.noticeEl.textContent = message;
+  }
+
+  clearNotice(): void {
+    if (this.noticeEl) {
+      this.noticeEl.remove();
+      this.noticeEl = null;
+    }
   }
 
   private setText(text: string) {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Copyright (C) 2026 hcz1017
 import { t } from './i18n';
+import { createLogBuffer } from './logbus';
 // 字幕记录的读写全部收敛在 transcript-store（与纯 Web 版共用同一份实现）；
 // 这里只需要追加与挂译文两个入口，其余导出留给未来可能用到的地方。
 import { appendTranscript, attachTranscriptTranslation } from './transcript-store';
@@ -63,6 +64,39 @@ let sessionEpoch = 0;
 // 快照兜底，让"每次打开面板"都能恢复上一段波形而不是从空基线重新填充。
 const LEVEL_SNAPSHOT_MAX = 60;
 let bgLevels: number[] = [];
+
+// —— 全部日志（用户要的"日志区"）：默认不看，面板底部按钮才展开 ——
+// 单一真相源放在 background：面板(popup)、offscreen、浮窗、助手的消息都汇到这里，
+// popup 关掉再打开也能看到历史（节流镜像到 storage.session，SW 被回收也还能捞回来）。
+const bgLogs = createLogBuffer();
+let logFlushTimer: any = null;
+//: 出错时不要把唯一显示端（悬浮字幕窗）关掉——用户得看见原因（"闪一下就没了"曾是最差体验）。
+let keepFloatingForNotice = false;
+
+function logLine(level: 'info' | 'warn' | 'error', source: string, message: string) {
+  const entry = bgLogs.append(level, source, String(message == null ? '' : message));
+  sendToPopup({ type: 'LOG_APPEND', entry });
+  if (!logFlushTimer) logFlushTimer = setTimeout(flushLogs, 1000);
+  return entry;
+}
+
+function flushLogs() {
+  logFlushTimer = null;
+  try {
+    // 只镜像最后 200 条：storage.session 是给"重开面板还能看到刚才发生了什么"，不是长期档案
+    chrome.storage.session.set({ tmspeech_logs: bgLogs.list().slice(-200) }).catch(() => {});
+  } catch { /* session 存储不可用（老浏览器）：内存里那份仍然能用 */ }
+}
+
+async function restoreLogs() {
+  try {
+    const r = await chrome.storage.session.get('tmspeech_logs');
+    const saved = (r && (r as any).tmspeech_logs) || [];
+    for (const e of saved) bgLogs.append(e.level || 'info', e.source || 'app', e.message || '', e.t);
+  } catch { /* 读不到就算新会话 */ }
+}
+
+void restoreLogs();
 
 function sendToPopup(msg: any) {
   chrome.runtime.sendMessage(msg).catch(() => {});
@@ -263,11 +297,17 @@ chrome.runtime.onConnect.addListener((port) => {
       // 它不是故障：不惊动悬浮窗、不走 ERROR 的 cleanupAll（那会把模型整场拆掉），
       // 只进面板日志区提醒一句"助手没连上，当前是静音"。
       if (p.type === 'HELPER_SILENT') {
+        // 坑（独立审查 ①②）：以前只发给 popup 的日志行 —— 点「开始」后 popup 必然已关闭，
+        // 而浮窗又刻意不接这类消息，于是"助手暂停/掉线"这类最高频的静音降级**零反馈**。
+        // 现在：进日志 + 给浮窗发一条常驻提示（浮窗是采集时唯一看得见的界面）。
+        logLine('warn', 'helper', p.message);
+        sendToFloating({ type: 'NOTICE', level: 'info', message: p.message });
         sendToPopup({ type: 'LOG', message: p.message });
       } else if (p.type === 'STATUS_CHANGED' || p.type === 'ERROR' || p.type === 'LEVEL') {
         sendToFloating(p);
       }
       if (p.type === 'STATUS_CHANGED') {
+        if (pipelineStatus !== p.status) logLine('info', 'session', p.status);
         pipelineStatus = p.status;
         // 坑：offscreen 不知道会话何时开始（尤其 SW 重启后 RECONNECT 自愈恢复的
         // Running），首次见到 Running 就地盖章；已有戳（正常 START 路径）不覆盖
@@ -275,6 +315,9 @@ chrome.runtime.onConnect.addListener((port) => {
         persistSession();
         // 附带 startedAt 让已打开的 popup 直接校准计时基准（重开面板不再从 00:00 起）
         sendToPopup({ ...p, startedAt: sessionStartedAt });
+      } else if (p.type === 'LOG') {
+        logLine('info', 'engine', p.message);
+        sendToPopup(p);
       } else if (p.type !== 'SENTENCE_DONE' && p.type !== 'HELPER_SILENT') {
         // 坑：SENTENCE_DONE 不能走这里原样转发——下方盖章块会再发一份带 ts 的，
         // 不排除的话 popup 每句收两条（一条无时标一条有），列表重复。
@@ -282,7 +325,14 @@ chrome.runtime.onConnect.addListener((port) => {
         // 第二条、还带"错误："前缀——它不是故障（独立审查抓的）。
         sendToPopup(p);
       }
-      if (p.type === 'ERROR') cleanupAll();
+      if (p.type === 'ERROR') {
+        // 真故障（设备被拔/助手崩了/休眠唤醒）：先让用户看见原因，**再**收敛会话。
+        // keepFloatingForNotice 让 cleanupAll 不要关掉浮窗 —— 否则用户只看到"闪一下消失"。
+        logLine('error', 'app', p.message);
+        keepFloatingForNotice = true;
+        sendToFloating({ type: 'NOTICE', level: 'error', message: p.message });
+        cleanupAll();
+      }
       if (p.type === 'SENTENCE_DONE') {
         // 坑：offscreen 发的 SENTENCE_DONE 只带 text 不带 ts——原样转发会让 popup
         // 推 {text, ts:0}，新句在面板里永远不显示时间戳（storage 入库反而是对的）。
@@ -479,7 +529,12 @@ function cleanupAll() {
   // 生命周期绑定（悬浮窗随会话）：会话停止即关闭悬浮窗——system 模式下它是唯一显示端，
   // 会话结束没有继续存在的意义。closeFloating 会触发 windows.onRemoved，彼时
   // pipelineStatus 已是 Stopped，onRemoved 里的"关窗即停止"守卫自然跳过，不会二次清理。
-  closeFloating();
+  // 例外：刚发了错误提示时留着它，让用户读得到原因（否则"闪一下就消失"）。用户点一下即关。
+  if (keepFloatingForNotice) {
+    keepFloatingForNotice = false;
+  } else {
+    closeFloating();
+  }
   sendToPopup({ type: 'STATUS_CHANGED', status: 'Stopped' });
 }
 
@@ -709,6 +764,21 @@ async function startRecognition(msg: any, respond: () => void) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'GET_LOGS') {
+    sendResponse({ entries: bgLogs.list() });
+    return;
+  }
+  if (msg.type === 'CLEAR_LOGS') {
+    bgLogs.clear();
+    flushLogs();
+    sendResponse({ ok: true });
+    return;
+  }
+  if (msg.type === 'LOG') {
+    // 面板/浮窗把各自那一条日志送来汇合（它们自己没有历史）
+    logLine(msg.level || 'info', msg.source || 'panel', msg.message || '');
+    return;
+  }
   if (msg.type === 'TRANSLATE_TEST') {
     // 面板"测试翻译"：转发给 offscreen（无 storage 权限，纯中继），用 id 关联应答。
     // 没在识别时 offscreen 文档不存在（offscreenPort 为空），先建文档等端口连上再发。

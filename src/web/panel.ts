@@ -276,6 +276,10 @@ setSessionLifecycleHooks({
   onSessionStopped() {
     restorePanelWindow();
   },
+  notice(level, message) {
+    // 采集时面板窗口会被让开、用户看到的是字幕浮窗 —— 原因必须送到那里（与扩展一致）
+    sendToPeer({ type: 'NOTICE', level, message });
+  },
   onSubtitlesVisibility(visible) {
     // 面板的「显示字幕」= 字幕浮窗开关。关掉就真的关窗（扩展里对应"页内叠层隐藏"，
     // Web 没有页内叠层，留着只会是一个空白浮窗）。

@@ -783,3 +783,50 @@ body[data-mode="light"] .unsup-card { box-shadow: 0 14px 36px rgba(0, 0, 0, 0.2)
   font-size: 12px;
   margin: 6px 0 0;
 }
+
+/* —— 日志窗（默认关闭；点「查看所有日志」才展开的"窗中窗"）—— */
+.log-entry { display: flex; justify-content: flex-start; margin: 2px 0 0; }
+.log-btn {
+  font: inherit; font-size: 11px; color: var(--text2); background: transparent;
+  border: 1px solid var(--line, #e5e7eb); border-radius: 6px; padding: 3px 8px; cursor: pointer;
+}
+.log-btn:hover { color: var(--text1); background: var(--hover, rgba(127, 127, 127, .08)); }
+.log-mask {
+  position: absolute; inset: 0; background: rgba(0, 0, 0, .45); display: flex;
+  align-items: center; justify-content: center; z-index: 60; padding: 10px;
+}
+.log-box {
+  width: 100%; max-width: 560px; max-height: 82%; display: flex; flex-direction: column;
+  background: var(--card, #fff); color: var(--text1, #111); border-radius: 10px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, .3); overflow: hidden;
+}
+.log-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-bottom: 1px solid var(--line, #e5e7eb); font-size: 12px; font-weight: 600;
+}
+.log-title { flex: 1; }
+.log-count { font-weight: 400; font-size: 11px; color: var(--text2, #666); }
+.log-tools {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  border-bottom: 1px solid var(--line, #e5e7eb); font-size: 11px;
+}
+.log-filter { display: flex; align-items: center; gap: 4px; color: var(--text2, #666); margin-right: auto; }
+.log-list {
+  flex: 1; overflow: auto; padding: 6px 10px; font-family: ui-monospace, SFMono-Regular,
+  Menlo, Consolas, monospace; font-size: 11px; line-height: 1.5; white-space: pre-wrap;
+  word-break: break-all;
+}
+.log-line { display: block; }
+.log-line.warn { color: #b45309; }
+.log-line.error { color: #dc2626; }
+.log-line .log-src { color: var(--text2, #888); }
+.log-empty { color: var(--text2, #888); font-style: italic; }
+
+/* —— 浮窗里的常驻提示（助手暂停/掉线/采集失败的原因）：用户唯一看得见的显示端 —— */
+.overlay-notice {
+  position: absolute; left: 8px; right: 8px; top: 6px; z-index: 5;
+  font-size: 12px; line-height: 1.5; padding: 6px 9px; border-radius: 8px; cursor: pointer;
+  background: rgba(17, 24, 39, .82); color: #f9fafb; backdrop-filter: blur(6px);
+}
+.overlay-notice.error { background: rgba(153, 27, 27, .88); }
+.overlay-notice .overlay-notice-hint { opacity: .65; font-size: 10px; margin-left: 6px; }

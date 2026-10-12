@@ -10,6 +10,7 @@
 //
 // 纪律：新增功能优先加在本文件 + ui-body.html 里，两端自动共享；
 // 只有真的需要 chrome.* 才按 IS_EXTENSION 分支，并且分支必须在 platform.ts 有对应封装。
+import { formatEntry } from './logbus';
 import { getLang, setLang, tSync } from './i18n';
 import {
   storage, sendToHost, onMessageFromHost, getActiveTabId,
@@ -464,6 +465,7 @@ requestAnimationFrame(() => {
 
 async function applyLang() {
   currentLang = await getLang();
+  applyLogsLang();
   const tr = (key: string) => tSync(currentLang, key);
   $('appTitle').textContent = tr('appTitle');
   $('btnStartText').textContent = tr('btnStart');
@@ -1212,8 +1214,135 @@ function setHeroLoading(key: string | null) {
   log(tSync(currentLang, key));
 }
 
-function log(msg: string) {
+// —— 日志窗（用户要的"窗中窗"：默认关闭，点底部按钮才展开）——
+type PanelLog = { t: number; level: string; source: string; message: string };
+let panelLogs: PanelLog[] = [];
+let logsOpen = false;
+
+function pushLocalLog(level: string, source: string, message: string) {
+  panelLogs.push({ t: Date.now(), level, source, message });
+  if (panelLogs.length > 500) panelLogs = panelLogs.slice(-500);
+  if (logsOpen) renderLogs();
+}
+
+function visibleLogs(): PanelLog[] {
+  const onlyErrors = ($opt('logOnlyErrors') as HTMLInputElement | null)?.checked === true;
+  return onlyErrors ? panelLogs.filter((e) => e.level === 'warn' || e.level === 'error') : panelLogs;
+}
+
+function renderLogs(): void {
+  const list = $opt('logList');
+  if (!list) return;
+  const rows = visibleLogs();
+  list.textContent = '';
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'log-empty';
+    empty.textContent = tSync(currentLang, 'logsEmpty');
+    list.appendChild(empty);
+  } else {
+    for (const entry of rows) {
+      const line = document.createElement('span');
+      line.className = 'log-line ' + (entry.level === 'error' ? 'error' : entry.level === 'warn' ? 'warn' : '');
+      // 与 logbus.formatEntry 同格式（复制出去的内容和屏幕上看到的一致）
+      line.textContent = formatEntry(entry as any);
+      list.appendChild(line);
+    }
+  }
+  const count = $opt('logCount');
+  if (count) count.textContent = tSync(currentLang, 'logsCount').replace('{n}', String(rows.length));
+  list.scrollTop = list.scrollHeight;   // 总是看最新的（调试时最关心"刚刚发生了什么"）
+}
+
+function openLogs(): void {
+  logsOpen = true;
+  const modal = $opt('logModal');
+  if (modal) modal.hidden = false;
+  renderLogs();
+  // 宿主那份才是全量（含 background/offscreen/助手消息），拉过来合并一次
+  void sendToHost({ type: 'GET_LOGS' }).then((resp: any) => {
+    const entries = Array.isArray(resp?.entries) ? resp.entries : [];
+    if (entries.length) {
+      panelLogs = entries.slice(-500);
+      renderLogs();
+    }
+  }).catch(() => {});
+}
+
+function closeLogs(): void {
+  logsOpen = false;
+  const modal = $opt('logModal');
+  if (modal) modal.hidden = true;
+}
+
+function clearLogs(): void {
+  panelLogs = [];
+  void sendToHost({ type: 'CLEAR_LOGS' }).catch(() => {});
+  renderLogs();
+}
+
+function copyLogs(): void {
+  const text = visibleLogs().map((e) => formatEntry(e as any)).join('\n');
+  const btn = $opt('logCopy');
+  const done = () => {
+    if (!btn) return;
+    const old = btn.textContent;
+    btn.textContent = tSync(currentLang, 'logsCopied');
+    setTimeout(() => { btn.textContent = old; }, 1200);
+  };
+  const nav: any = navigator;
+  if (nav?.clipboard?.writeText) {
+    nav.clipboard.writeText(text).then(done).catch(() => {});
+  } else {
+    // file:// 或老内核没有 clipboard API：退化成选中文本让用户自己复制
+    const list = $opt('logList');
+    if (list) {
+      const range = document.createRange();
+      range.selectNodeContents(list);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+    done();
+  }
+}
+
+function wireLogs(): void {
+  $opt('btnLogs')?.addEventListener('click', () => (logsOpen ? closeLogs() : openLogs()));
+  $opt('logClose')?.addEventListener('click', closeLogs);
+  $opt('logClear')?.addEventListener('click', clearLogs);
+  $opt('logCopy')?.addEventListener('click', copyLogs);
+  $opt('logOnlyErrors')?.addEventListener('change', renderLogs);
+  // 点遮罩也能关（与其它模态一致的手感）
+  $opt('logModal')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement)?.id === 'logModal') closeLogs();
+  });
+  applyLogsLang();
+}
+
+function applyLogsLang(): void {
+  const set = (id: string, key: string) => {
+    const el = $opt(id);
+    if (el) el.textContent = tSync(currentLang, key);
+  };
+  set('btnLogs', 'logsButton');
+  set('logTitle', 'logsTitle');
+  set('logCopy', 'logsCopy');
+  set('logClear', 'logsClear');
+  set('logOnlyErrorsLabel', 'logsOnlyErrors');
+  const close = $opt('logClose');
+  if (close) close.setAttribute('aria-label', tSync(currentLang, 'logsClose'));
+}
+
+function log(msg: string, record = true) {
   modelStatus.textContent = msg;
+  // 用户要的"所有日志"：状态栏只有一行、下一秒就被覆盖，这里同步送进全局缓冲（background/host），
+  // 面板底部那个按钮展开时才看得到全部。
+  // record=false 用于**来自宿主**的消息（宿主已经记过一遍）：否则同一条会记两次。
+  if (record) {
+    void sendToHost({ type: 'LOG', level: 'info', source: 'panel', message: msg }).catch(() => {});
+    pushLocalLog('info', 'panel', msg);
+  }
 }
 
 // —— 系统音频不支持·模态提示 ——
@@ -1550,6 +1679,8 @@ async function doStart(): Promise<void> {
   // 同上：tab 音源的加载态也在发送 START 的此刻亮出，不等引擎的 STATUS_TEXT
   setHeroLoading(!IS_EXTENSION ? 'loadingModelWeb' : 'loadingModel');
 }
+
+wireLogs();   // 日志窗（默认关闭；点底部按钮展开）的接线
 
 export function triggerStart(): void { void doStart(); }
 btnStart.onclick = () => { void doStart(); };
@@ -2336,19 +2467,23 @@ onMessageFromHost((msg) => {
       setStatus(msg.status, msg.startedAt);
       break;
     case 'LOG':
-      log(msg.message);
+      log(msg.message, false);
+      break;
+    case 'LOG_APPEND':
+      // background 广播的新日志（含它自己/引擎/助手那几条）：日志窗开着就实时追加
+      if (msg.entry) pushLocalLog(msg.entry.level || 'info', msg.entry.source || 'app', msg.entry.message || '');
       break;
     case 'HELPER_SILENT':
       // 桌面助手没启动/没连上/处于暂停：不是故障——会话照常跑（这个音源此刻就是静音）。
       // 只在日志区提醒一句（**不带**"错误："前缀，它不是错误），不置 Stopped、不弹模态。
-      log(String(msg.message || ''));
+      log(String(msg.message || ''), false);
       break;
     case 'ERROR': {
       // 坑：errorPrefix 的 {m} 是占位符，须手动 replace（与 searchHits 同一套约定）。
       // 又一类坑（复审抓到）：助手侧运行期错误在 helper.helperErrorMessage 里**已经**套过
       // 一次 errorPrefix，这里再套一次就变成"错误：错误：…"。所以先看是否已带前缀。
       const raw = String(msg.message ?? '');
-      log(withErrorPrefix(raw));
+      log(withErrorPrefix(raw), false);
       // 麦克风启动失败升级为模态：授权框没出现就闪退时，这是用户唯一读得到原因的地方
       if (msg.micFailure) showMicErrorModal(String(msg.message || ''));
       setStatus('Stopped');
