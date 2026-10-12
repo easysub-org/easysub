@@ -81,7 +81,7 @@ function getEngine(): AsrEngine {
       resolveUrl,
       pushMs: WEB_PUSH_MS,
       sink: {
-        log: (message) => emitToPanel({ type: 'LOG', message }),
+        log: (message) => emitLog(message),   // 引擎日志也进日志缓冲（否则日志窗里只有助手那几条）
         toDisplay: (payload) => sendToPeer(payload),
         toPanel: (payload) => {
           const p = payload || {};

@@ -361,6 +361,18 @@ async function detectHelper(full = false) {
     void saveHelperSession(helperSession);
   }
   updateSourceHint();
+  // 日志窗里最有价值的一条（用户想调试"为什么连不上"时先看它）：
+  // 探到没探到、端口、有没有配对、助手是否暂停、版本与协议版本。
+  if (helperInfo) {
+    recordLog('info', 'helper', tSync(currentLang, 'logHelperProbe')
+      .replace('{port}', String(helperInfo.port))
+      .replace('{paired}', String(helperInfo.paired))
+      .replace('{paused}', String(helperInfo.paused))
+      .replace('{version}', String(helperInfo.version || '?'))
+      .replace('{api}', String(helperInfo.api ?? '?')));
+  } else {
+    recordLog('warn', 'helper', tSync(currentLang, 'logHelperProbeNone'));
+  }
 }
 
 // —— 系统音频·选择器前置确认框（两端共用）——
@@ -1225,6 +1237,21 @@ function pushLocalLog(level: string, source: string, message: string) {
   if (logsOpen) renderLogs();
 }
 
+/** 把宿主那份（引擎/助手/session）与面板本地那份合并：按"时间+来源+内容"去重后按时间排。 */
+function mergeLogs(hostEntries: PanelLog[]) {
+  const byKey = new Map<string, PanelLog>();
+  for (const e of hostEntries) byKey.set(`${e.t}|${e.source}|${e.message}`, e);
+  // 面板本地那份**优先**（它记录了宿主还没收到时的早期日志）
+  for (const e of panelLogs) byKey.set(`${e.t}|${e.source}|${e.message}`, e);
+  panelLogs = Array.from(byKey.values()).sort((a, b) => a.t - b.t).slice(-500);
+}
+
+/** 记录一条日志但**不碰状态栏**（状态栏是"当前状态"，日志是历史，两者别混）。 */
+function recordLog(level: 'info' | 'warn' | 'error', source: string, message: string) {
+  pushLocalLog(level, source, message);
+  void sendToHost({ type: 'LOG', level, source, message }).catch(() => {});
+}
+
 function visibleLogs(): PanelLog[] {
   const onlyErrors = ($opt('logOnlyErrors') as HTMLInputElement | null)?.checked === true;
   return onlyErrors ? panelLogs.filter((e) => e.level === 'warn' || e.level === 'error') : panelLogs;
@@ -1263,7 +1290,7 @@ function openLogs(): void {
   void sendToHost({ type: 'GET_LOGS' }).then((resp: any) => {
     const entries = Array.isArray(resp?.entries) ? resp.entries : [];
     if (entries.length) {
-      panelLogs = entries.slice(-500);
+      mergeLogs(entries.slice(-500));
       renderLogs();
     }
   }).catch(() => {});
@@ -1326,6 +1353,8 @@ function applyLogsLang(): void {
     if (el) el.textContent = tSync(currentLang, key);
   };
   set('btnLogs', 'logsButton');
+  const openBtn = $opt('btnLogs');
+  if (openBtn) openBtn.setAttribute('title', tSync(currentLang, 'logsButton'));
   set('logTitle', 'logsTitle');
   set('logCopy', 'logsCopy');
   set('logClear', 'logsClear');
@@ -1339,10 +1368,7 @@ function log(msg: string, record = true) {
   // 用户要的"所有日志"：状态栏只有一行、下一秒就被覆盖，这里同步送进全局缓冲（background/host），
   // 面板底部那个按钮展开时才看得到全部。
   // record=false 用于**来自宿主**的消息（宿主已经记过一遍）：否则同一条会记两次。
-  if (record) {
-    void sendToHost({ type: 'LOG', level: 'info', source: 'panel', message: msg }).catch(() => {});
-    pushLocalLog('info', 'panel', msg);
-  }
+  if (record) recordLog('info', 'panel', msg);
 }
 
 // —— 系统音频不支持·模态提示 ——
@@ -2470,8 +2496,11 @@ onMessageFromHost((msg) => {
       log(msg.message, false);
       break;
     case 'LOG_APPEND':
-      // background 广播的新日志（含它自己/引擎/助手那几条）：日志窗开着就实时追加
-      if (msg.entry) pushLocalLog(msg.entry.level || 'info', msg.entry.source || 'app', msg.entry.message || '');
+      // 宿主广播的新日志（它自己/引擎/助手那几条）。**跳过 source==='panel'**：面板自己的
+      // 日志已经本地记过一遍，回播会变成两条（"日志里同一条出现两遍"最招人烦）。
+      if (msg.entry && msg.entry.source !== 'panel') {
+        pushLocalLog(msg.entry.level || 'info', msg.entry.source || 'app', msg.entry.message || '');
+      }
       break;
     case 'HELPER_SILENT':
       // 桌面助手没启动/没连上/处于暂停：不是故障——会话照常跑（这个音源此刻就是静音）。

@@ -221,6 +221,8 @@ const strings: Record<string, Record<string, string>> = {
     sourceMic: '麦克风',
     sourceHelper: '桌面助手（实验性）',
     // —— 日志窗（默认关闭：点面板底部的「查看所有日志」才展开）——
+    logHelperProbe: '探测桌面助手：端口 {port}｜已配对 {paired}｜助手暂停 {paused}｜版本 {version}｜协议 {api}',
+    logHelperProbeNone: '未探测到桌面助手（试过记住的端口与 8790–8810）',
     logsButton: '查看所有日志',
     logsTitle: '全部日志',
     logsCopy: '复制全部',
@@ -516,6 +518,8 @@ const strings: Record<string, Record<string, string>> = {
     sourceMic: 'Microphone',
     sourceHelper: 'Desktop helper (experimental)',
     // —— log window (hidden by default; opened from the button at the bottom) ——
+    logHelperProbe: 'helper probe: port {port} | paired {paired} | paused {paused} | version {version} | api {api}',
+    logHelperProbeNone: 'no desktop helper found (tried the remembered port and 8790-8810)',
     logsButton: 'View all logs',
     logsTitle: 'All logs',
     logsCopy: 'Copy all',
