@@ -10,7 +10,7 @@
 //
 // 纪律：新增功能优先加在本文件 + ui-body.html 里，两端自动共享；
 // 只有真的需要 chrome.* 才按 IS_EXTENSION 分支，并且分支必须在 platform.ts 有对应封装。
-import { formatEntry } from './logbus';
+import { dedupeLogs, formatEntry, nextLogId, normalizeMessage } from './logbus';
 import { getLang, setLang, tSync } from './i18n';
 import {
   storage, sendToHost, onMessageFromHost, getActiveTabId,
@@ -1227,29 +1227,45 @@ function setHeroLoading(key: string | null) {
 }
 
 // —— 日志窗（用户要的"窗中窗"：默认关闭，点底部按钮才展开）——
-type PanelLog = { t: number; level: string; source: string; message: string };
+type PanelLog = { id: string; t: number; level: string; source: string; message: string };
 let panelLogs: PanelLog[] = [];
 let logsOpen = false;
+//: "清空"的序号：作废在途的 GET_LOGS 响应（否则清空后老日志会被它的回调合并回来）。
+let logsClearedAt = 0;
 
-function pushLocalLog(level: string, source: string, message: string) {
-  panelLogs.push({ t: Date.now(), level, source, message });
+/** 面板本地记录（**始终**记，与日志窗是否打开无关）。 */
+function pushLocalLog(level: string, source: string, message: string,
+                      meta?: { t?: number; id?: string }): PanelLog {
+  const entry: PanelLog = {
+    id: (meta && meta.id) || nextLogId(),
+    t: meta && typeof meta.t === 'number' ? meta.t : Date.now(),
+    level,
+    source,
+    // 与 logbus 同一套归一化（换行压平）——否则同一条多行日志在合并前后文本都不同，去重也会失败
+    message: normalizeMessage(message),
+  };
+  panelLogs.push(entry);
   if (panelLogs.length > 500) panelLogs = panelLogs.slice(-500);
   if (logsOpen) renderLogs();
+  return entry;
 }
 
-/** 把宿主那份（引擎/助手/session）与面板本地那份合并：按"时间+来源+内容"去重后按时间排。 */
+/**
+ * 合并宿主那份与面板本地那份：**按稳定 id 去重**（原来用"时间+来源+内容"，而时间戳每一跳
+ * 都会被重新盖章 → 同一条日志永远去不掉，日志窗里每行出现两三遍。独立审查 B1）。
+ * 去重实现放在 logbus 里（纯函数、有单测守门），这里只负责"面板本地优先"的顺序。
+ */
 function mergeLogs(hostEntries: PanelLog[]) {
-  const byKey = new Map<string, PanelLog>();
-  for (const e of hostEntries) byKey.set(`${e.t}|${e.source}|${e.message}`, e);
-  // 面板本地那份**优先**（它记录了宿主还没收到时的早期日志）
-  for (const e of panelLogs) byKey.set(`${e.t}|${e.source}|${e.message}`, e);
-  panelLogs = Array.from(byKey.values()).sort((a, b) => a.t - b.t).slice(-500);
+  panelLogs = dedupeLogs([hostEntries, panelLogs] as any) as unknown as PanelLog[];
 }
 
 /** 记录一条日志但**不碰状态栏**（状态栏是"当前状态"，日志是历史，两者别混）。 */
 function recordLog(level: 'info' | 'warn' | 'error', source: string, message: string) {
-  pushLocalLog(level, source, message);
-  void sendToHost({ type: 'LOG', level, source, message }).catch(() => {});
+  if (!message) return;                     // 空消息不该在日志窗里留空行（独立审查 B12）
+  // **先生成身份再记**：同一个 id/t 送给宿主，它回播时带着同一个 id，去重才成立。
+  const meta = { t: Date.now(), id: nextLogId() };
+  pushLocalLog(level, source, message, meta);
+  void sendToHost({ type: 'LOG', level, source, message, t: meta.t, id: meta.id }).catch(() => {});
 }
 
 function visibleLogs(): PanelLog[] {
@@ -1261,11 +1277,17 @@ function renderLogs(): void {
   const list = $opt('logList');
   if (!list) return;
   const rows = visibleLogs();
+  // 独立审查 B7：以前每次渲染都重建全部节点并无条件滚到底 —— 用户想往上翻历史会被每条新
+  // 日志拽回底部（新的还在实时追加），刚做的文本选择也被清掉。现在：本来就贴着底部才跟随，
+  // 否则保持用户的滚动位置。
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
   list.textContent = '';
   if (!rows.length) {
     const empty = document.createElement('div');
     empty.className = 'log-empty';
-    empty.textContent = tSync(currentLang, 'logsEmpty');
+    // 过滤后为空 ≠ 没有日志（独立审查 N3：用同一句"暂无日志"会让用户以为日志全丢了）
+    const onlyErrors = ($opt('logOnlyErrors') as HTMLInputElement | null)?.checked === true;
+    empty.textContent = tSync(currentLang, onlyErrors ? 'logsNoMatch' : 'logsEmpty');
     list.appendChild(empty);
   } else {
     for (const entry of rows) {
@@ -1278,7 +1300,7 @@ function renderLogs(): void {
   }
   const count = $opt('logCount');
   if (count) count.textContent = tSync(currentLang, 'logsCount').replace('{n}', String(rows.length));
-  list.scrollTop = list.scrollHeight;   // 总是看最新的（调试时最关心"刚刚发生了什么"）
+  if (atBottom) list.scrollTop = list.scrollHeight;   // 贴着底部才跟随最新
 }
 
 function openLogs(): void {
@@ -1286,8 +1308,11 @@ function openLogs(): void {
   const modal = $opt('logModal');
   if (modal) modal.hidden = false;
   renderLogs();
-  // 宿主那份才是全量（含 background/offscreen/助手消息），拉过来合并一次
+  // 宿主那份才是全量（含 background/offscreen/助手消息），拉过来合并一次。
+  // 记下发起时的"清空序号"：期间用户点了清空就丢弃这份响应（独立审查 B9）。
+  const gen = logsClearedAt;
   void sendToHost({ type: 'GET_LOGS' }).then((resp: any) => {
+    if (gen !== logsClearedAt) return;
     const entries = Array.isArray(resp?.entries) ? resp.entries : [];
     if (entries.length) {
       mergeLogs(entries.slice(-500));
@@ -1304,24 +1329,28 @@ function closeLogs(): void {
 
 function clearLogs(): void {
   panelLogs = [];
+  // 作废在途的 GET_LOGS 响应：否则"打开后立刻清空"时，已经发出、稍后才 resolve 的那份
+  // 会把它 mergeLogs 回来（看起来清空没生效、老日志又活了）。独立审查 B9。
+  logsClearedAt = Date.now();
   void sendToHost({ type: 'CLEAR_LOGS' }).catch(() => {});
   renderLogs();
 }
 
 function copyLogs(): void {
-  const text = visibleLogs().map((e) => formatEntry(e as any)).join('\n');
+  const rows = visibleLogs();
   const btn = $opt('logCopy');
+  if (!rows.length) return;                  // 空列表不该把用户的剪贴板清成空串（独立审查 B6）
+  const text = rows.map((e) => formatEntry(e as any)).join('\n');
   const done = () => {
     if (!btn) return;
     const old = btn.textContent;
     btn.textContent = tSync(currentLang, 'logsCopied');
     setTimeout(() => { btn.textContent = old; }, 1200);
   };
-  const nav: any = navigator;
-  if (nav?.clipboard?.writeText) {
-    nav.clipboard.writeText(text).then(done).catch(() => {});
-  } else {
-    // file:// 或老内核没有 clipboard API：退化成选中文本让用户自己复制
+  // 退路：选中列表文本让用户自己按 Ctrl+C。**失败也要走这里**——以前 writeText 被拒时
+  // 只 `.catch(()=>{})`，用户点「复制全部」毫无反应（注释假设的"file:// 没有 clipboard API"
+  // 不成立：file:// 是安全上下文，API 在、但常因权限/焦点 reject）。独立审查 B6。
+  const fallback = () => {
     const list = $opt('logList');
     if (list) {
       const range = document.createRange();
@@ -1331,6 +1360,12 @@ function copyLogs(): void {
       sel?.addRange(range);
     }
     done();
+  };
+  const nav: any = navigator;
+  if (nav?.clipboard?.writeText) {
+    nav.clipboard.writeText(text).then(done).catch(fallback);
+  } else {
+    fallback();
   }
 }
 
@@ -1343,6 +1378,10 @@ function wireLogs(): void {
   // 点遮罩也能关（与其它模态一致的手感）
   $opt('logModal')?.addEventListener('click', (e) => {
     if ((e.target as HTMLElement)?.id === 'logModal') closeLogs();
+  });
+  // 独立审查 B8：其它窗中窗都能 Esc 关，这个也得能（否则键盘用户被"关在里面"）。
+  $opt('logModal')?.addEventListener('keydown', (e) => {
+    if ((e as KeyboardEvent).key === 'Escape') closeLogs();
   });
   applyLogsLang();
 }

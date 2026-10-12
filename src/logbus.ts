@@ -15,7 +15,13 @@
 export type LogLevel = 'info' | 'warn' | 'error';
 
 export interface LogEntry {
-  /** 毫秒时间戳（外部传入，便于测试）。 */
+  /**
+   * **跨上下文稳定身份**。同一条日志在"面板本地 → 宿主缓冲 → 回播给面板"这三跳里必须
+   * 携带同一个 id，否则去重键（原来用"时间+来源+内容"）永远不会命中 —— 时间戳每一跳都被
+   * 重新盖章，结果日志窗里每行都出现两三遍（独立审查 B1，实测必现）。
+   */
+  id: string;
+  /** 毫秒时间戳（外部传入，便于测试；同一 id 必须沿用同一个 t）。 */
   t: number;
   level: LogLevel;
   /** 来源：panel / background / offscreen / helper / floating … */
@@ -23,12 +29,48 @@ export interface LogEntry {
   message: string;
 }
 
+/** 消息归一化：换行会毁掉"一行一条"与复制，统一压平（面板与宿主必须用同一套规则）。 */
+export function normalizeMessage(message: unknown): string {
+  return String(message == null ? '' : message).replace(/\s*\n\s*/g, ' ⏎ ');
+}
+
+//: 进程内自增序号，与时间戳一起构成 id（同一毫秒内的多条也不会撞）。
+let idSeq = 0;
+
+/** 生成一个日志 id（调用方只在**产生**日志时生成一次，之后一路沿用）。 */
+export function nextLogId(): string {
+  idSeq += 1;
+  return `${Date.now().toString(36)}-${idSeq.toString(36)}`;
+}
+
+/**
+ * 合并多份日志列表：**按 id 去重**、按时间排序、保留最后 `limit` 条。
+ *
+ * 这是"日志窗每行重复两三遍"那个 bug（独立审查 B1）的守门函数：以前按"时间+来源+内容"去重，
+ * 而时间戳在"面板本地 → 宿主缓冲 → 回播"每一跳都被重新盖章，键永远不同 → 一条都去不掉。
+ * 后传的列表优先（面板本地那份覆盖宿主那份，因为它可能记录了宿主还没收到的早期日志）。
+ */
+export function dedupeLogs(lists: LogEntry[][], limit: number = DEFAULT_LIMIT): LogEntry[] {
+  const byId = new Map<string, LogEntry>();
+  for (const list of lists) {
+    for (const entry of list) {
+      if (!entry) continue;
+      // 没有 id 的（外部/旧数据）退化成"时间+来源+内容"，至少不会因缺字段而整条丢掉
+      const key = entry.id || `${entry.t}|${entry.source}|${entry.message}`;
+      byId.set(key, entry);
+    }
+  }
+  const rows = Array.from(byId.values()).sort((a, b) => (a.t || 0) - (b.t || 0));
+  return rows.length > limit ? rows.slice(rows.length - limit) : rows;
+}
+
 //: 默认上限。用户要"所有日志"，但内存不能无限涨：500 条足够回溯一整场会话，
 //: 而且环形保留**最新**的（出问题时用户需要的是刚刚发生了什么）。
 export const DEFAULT_LIMIT = 500;
 
 export interface LogBuffer {
-  append(level: LogLevel, source: string, message: string, t?: number): LogEntry;
+  /** 追加一条。`meta.id`/`meta.t` 用于**沿用调用方的身份**（跨上下文回播时别重新盖章）。 */
+  append(level: LogLevel, source: string, message: string, meta?: { t?: number; id?: string }): LogEntry;
   list(): LogEntry[];
   clear(): void;
   /** 订阅新增条目（返回取消订阅函数）。 */
@@ -61,13 +103,15 @@ export function createLogBuffer(limit: number = DEFAULT_LIMIT): LogBuffer {
   const keep = Math.max(1, Math.floor(limit));
 
   return {
-    append(level, source, message, t) {
+    append(level, source, message, meta) {
+      const t = meta && typeof meta.t === 'number' ? meta.t : Date.now();
       const entry: LogEntry = {
-        t: typeof t === 'number' ? t : Date.now(),
+        // 身份：调用方给了就沿用（跨上下文回播必须沿用，否则去重永远命中不了）
+        id: (meta && meta.id) || nextLogId(),
+        t,
         level,
         source: source || 'app',
-        // 换行会把"一行一条"弄乱，复制出去也不好读 → 压成空格
-        message: String(message == null ? '' : message).replace(/\s*\n\s*/g, ' ⏎ '),
+        message: normalizeMessage(message),
       };
       entries.push(entry);
       if (entries.length > keep) entries = entries.slice(entries.length - keep);

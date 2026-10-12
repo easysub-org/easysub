@@ -43,5 +43,18 @@
     .toolbar button:hover { background: rgba(255, 255, 255, 0.16); }
     .toolbar button:disabled { opacity: 0.35; cursor: default; }
     .toolbar button.pinned { background: #4c9ee8; border-color: transparent; color: #fff; }
+
+    /* —— 常驻提示：助手暂停/掉线/采集失败的原因 ——
+       独立审查 B4：这段原本写在 ui.css 里，而悬浮字幕窗只加载**本文件**，于是提示在唯一的
+       目标窗口里完全没有样式（不是顶部药丸、没有红底，只是叠层里一段裸文本）。
+       浮窗是采集时唯一看得见的界面，这条提示必须在这里生效；点一下由 overlay.ts 关掉。 */
+    .overlay-notice {
+      position: absolute; left: 8px; right: 8px; top: 6px; z-index: 5;
+      font: 400 12px/1.5 system-ui, sans-serif; padding: 6px 9px; border-radius: 8px; cursor: pointer;
+      background: rgba(17, 24, 39, .84); color: #f9fafb; backdrop-filter: blur(6px);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, .28);
+    }
+    .overlay-notice.error { background: rgba(153, 27, 27, .9); }
+
     [hidden] { display: none !important; }
   

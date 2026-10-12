@@ -118,7 +118,18 @@ function getEngine(): AsrEngine {
             emitToPanel(p);
           }
           // ERROR：音频注定进不来，收敛成一次可见的停止（同扩展的 cleanupAll）
-          if (p.type === 'ERROR') stopSession();
+          if (p.type === 'ERROR') {
+            // 独立审查 B3-B：引擎自己发的 ERROR 以前既没进日志缓冲、也没给显示端发通知
+            // （扩展侧两件都做），于是 Web 日志窗缺这类错误、浮窗也永远不提示。
+            const text = String(p.message || '');
+            if (text) {
+              logLine('error', 'app', text);
+              noticeToDisplays('error', text);
+            }
+            // B3-A：别让 stopSession 顺手把唯一的显示端关掉（扩展侧有 keepFloatingForNotice）
+            keepSubtitleForNotice = true;
+            stopSession();
+          }
         },
         // 采集彻底起不来（用户关掉屏幕选择器、音频轨异常、模型缺失）→ 立即收敛会话，
         // 否则面板停在"识别中"、浮窗空挂，成为没有任何反馈的幽灵会话。
@@ -172,6 +183,8 @@ async function startHelperSource(isStale: () => boolean) {
       message = appendHelperErrorHint(message, code, msgLang);
       logLine('error', 'app', message);
       noticeToDisplays('error', message);
+      // 同 B3-A：这次错误的原因要留在显示端上，别被随后的 stopSession 关窗吞掉。
+      keepSubtitleForNotice = true;
       emitToPanel({ type: 'ERROR', message });
       stopSession();
     },
@@ -203,7 +216,10 @@ export function stopSession() {
   lifeHooks.onSessionStopped?.();
   // 生命周期绑定（同扩展 cleanupAll 末尾的 closeFloating）：会话结束，字幕显示端
   // 没有继续存在的意义。此前漏了这一步，表现为"停止后浮窗还在那儿挂着"。
-  if (wasRunning) closeSubtitleWindow();
+  // 例外（独立审查 B3-A）：刚发过错误常驻提示时留着它 —— 否则用户只看到"浮窗闪一下就没了"，
+  // 而"让唯一看得见的界面显示原因"正是这条特性的全部意义。用户点一下提示即关。
+  if (wasRunning && !keepSubtitleForNotice) closeSubtitleWindow();
+  keepSubtitleForNotice = false;
 }
 
 export function getSessionStatus() { return status; }
@@ -217,19 +233,25 @@ export function isSessionActive(): boolean { return sessionActive; }
 const webLogs = createLogBuffer();
 
 export function emitLog(message: string, level: 'info' | 'warn' | 'error' = 'info',
-                        source = 'engine') {
-  webLogs.append(level, source, String(message == null ? '' : message));
-  emitToPanel({ type: 'LOG', message });
+                        source = 'engine', meta?: { t?: number; id?: string }) {
+  // 坑（独立审查 B10）：以前只 emitToPanel({type:'LOG'}) —— 面板只把它写进状态栏，
+  // 日志窗开着时**不会实时刷新**（扩展侧走的是 logLine→LOG_APPEND，是实时的）。统一走 logLine。
+  logLine(level, source, String(message == null ? '' : message), meta);
 }
 
-/** 把带级别的日志也广播给面板（日志窗实时追加）。 */
-function logLine(level: 'info' | 'warn' | 'error', source: string, message: string) {
-  const entry = webLogs.append(level, source, String(message == null ? '' : message));
+/** 把带级别的日志也广播给面板（日志窗实时追加）。`meta` 沿用调用方身份，理由同 logbus.LogEntry.id。 */
+function logLine(level: 'info' | 'warn' | 'error', source: string, message: string,
+                 meta?: { t?: number; id?: string }) {
+  const entry = webLogs.append(level, source, String(message == null ? '' : message), meta);
   emitToPanel({ type: 'LOG_APPEND', entry });
   return entry;
 }
 
 /** 浮窗/页内叠层的常驻提示（与扩展 background 的 NOTICE 契约一致）。 */
+//: 刚发过错误常驻提示 → 收敛会话时**留着**唯一的显示端，让用户读到原因（独立审查 B3-A，
+//: 对应扩展侧的 keepFloatingForNotice）。
+let keepSubtitleForNotice = false;
+
 function noticeToDisplays(level: 'info' | 'error', message: string) {
   lifeHooks.notice?.(level, message);
 }
@@ -288,6 +310,9 @@ export async function preAcquireAudio(source: string): Promise<MediaStream | nul
 
 async function startSession(msg: any) {
   const source = msg.source === 'mic' ? 'mic' : msg.source === 'helper' ? 'helper' : 'system';
+  // 新会话开始：撤掉上一场留下的常驻提示（浮窗是跨会话复用的窗口，独立审查 B2-A）
+  keepSubtitleForNotice = false;
+  noticeToDisplays('info', '');
   // 会话语言：错误文案要用会话启动时的语言（面板切语言后重开会话才变，与扩展一致）
   if (msg.lang) msgLang = msg.lang;
   // 先停干净上一场（含上一场的 getDisplayMedia 轨道），避免两份采集并存
@@ -440,8 +465,10 @@ export function installWebHost() {
         return { ok: true };
 
       case 'LOG':
-        // 面板把自己的日志送进来（它只有一行状态栏，没有历史）
-        logLine(msg.level || 'info', msg.source || 'panel', msg.message || '');
+        // 面板把自己的日志送进来（它只有一行状态栏，没有历史）。**沿用它的 id/t**，
+        // 回播时带同一个身份才能在日志窗里去重（独立审查 B1）。
+        logLine(msg.level || 'info', msg.source || 'panel', msg.message || '',
+                { t: msg.t, id: msg.id });
         return true;
 
       case 'OVERLAY_TOGGLE':

@@ -812,12 +812,8 @@ body[data-mode="dark"] .log-line.error { color: #f87171; }
 .log-line .log-src { color: var(--text2); }
 .log-empty { color: var(--text2); font-style: italic; }
 
-/* —— 浮窗里的常驻提示（助手暂停/掉线/采集失败的原因）——
-   浮窗是采集时唯一看得见的界面；两种级别各一套底色，深浅模式下都清晰。 */
-.overlay-notice {
-  position: absolute; left: 8px; right: 8px; top: 6px; z-index: 5;
-  font: 400 12px/1.5 system-ui, sans-serif; padding: 6px 9px; border-radius: 8px; cursor: pointer;
-  background: rgba(17, 24, 39, .84); color: #f9fafb; backdrop-filter: blur(6px);
-  box-shadow: 0 6px 18px rgba(0, 0, 0, .28);
-}
-.overlay-notice.error { background: rgba(153, 27, 27, .9); }
+/* 注：`.overlay-notice`（浮窗顶部常驻提示）的样式**不在这里** —— 悬浮字幕窗只加载
+   `subtitle-shell.css`，写在面板样式表里等于没样式（独立审查 B4）。见该文件同名片段的注释。 */
+/* 日志窗刻意置于其它窗中窗之上：它是用户主动打开的"查看全部"，同 z-index 时会被后声明的
+   模态（unsup/pair/micErr）盖住，而它在 DOM 里最靠前（独立审查 B8）。 */
+#logModal { z-index: 70; }
