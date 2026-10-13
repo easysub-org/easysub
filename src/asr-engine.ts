@@ -23,10 +23,8 @@ import type { TranslateApiSettings } from './translate-api';
 //: 在途翻译的兜底上限（毫秒）：超过就放行队列 —— 见 armTranslateWatchdog。
 //: 取 25 秒：比 worker 自己的 15 秒请求超时更宽，正常慢模型不会误伤，但"永远 pending"一定会被兜住。
 const TRANSLATE_WATCHDOG_MS = 25000;
-//: 「实时跟句」的最小提交间隔。UI 与 README 一直承诺"每 0.5 秒最多一次"，而实现是
-//: "worker 一空闲就提交"（本地快模型可达 3–10 次/秒）—— 盲审把它列为 major：
-//: 与用户可见文案矛盾，云端 API 上还是真金白银，并会撞 429 触发失败。
-const STREAM_MIN_INTERVAL_MS = 500;
+//: 「实时跟句」**不做固定节流**（用户明确要求）：天然节流来自"一次只有一条在途" ——
+//: 上一句译文回来才发下一句。快模型自然快、慢模型自然慢，不堆积也不并发压垮服务。
 
 // ---- wasm 脚本动态注入（nomodel 支持）----
 // 宿主页面只静态加载 preload.js（仅定义 Module 不拉资源）。三个 wasm 脚本必须等
@@ -147,7 +145,7 @@ export class AsrEngine {
   private translateWatchdog: any = null;
   /** 上次翻译**出错**的时间：失败只告警、不关门（30 秒节流），见 onTranslationResult。 */
   private lastTranslateErrorAt = 0;
-  /** 上次提交「跟句」任务的时间：真实节流用，见 STREAM_MIN_INTERVAL_MS。 */
+  /** 上次提交「跟句」任务的时间（仅诊断用）。 */
   private lastStreamSubmitAt = 0;
   /** 节流窗口结束后补提交（跟句任务被推迟时用）。 */
   private streamThrottleTimer: any = null;
@@ -635,23 +633,12 @@ export class AsrEngine {
     for (let i = 0; i < this.transQueue.length; i++) {
       if (this.transQueue[i].kind === 'final') { job = this.transQueue[i]; idx = i; break; }
     }
-    // 优先级 2：实时流式——**受真实节流**（见 STREAM_MIN_INTERVAL_MS）：
-    // 文案承诺"每 0.5 秒最多一次"，先前是"worker 一空闲立刻提交"，快模型能到 3–10 次/秒。
-    // 仍然优先于积压补译（下面那支），只是把提交频率限制住；被推迟的最新中间态留在
-    // streamSlot 里，窗口一到就补提交。
+    // 优先级 2：实时流式——**一次只放一条在途**（pumpTranslate 开头就挡住并发），
+    // 所以"上一句译文回来之后才发下一句"就是天然节流：慢模型自然慢，不会堆积、也不会
+    // 并发压垮服务。刻意**不加时间窗**（用户明确要求：500ms 那种固定节流太伤体验）。
     if (!job && this.streamSlot && this.translationTiming === 'stream') {
-      const wait = STREAM_MIN_INTERVAL_MS - (Date.now() - this.lastStreamSubmitAt);
-      if (wait > 0) {
-        if (!this.streamThrottleTimer) {
-          this.streamThrottleTimer = setTimeout(() => {
-            this.streamThrottleTimer = null;
-            this.pumpTranslate();
-          }, wait);
-        }
-      } else {
-        job = { kind: 'stream', seq: this.streamSlot.seq, text: this.streamSlot.text, at: Date.now() };
-        fromSlot = true;
-      }
+      job = { kind: 'stream', seq: this.streamSlot.seq, text: this.streamSlot.text, at: Date.now() };
+      fromSlot = true;
     }
     // 优先级 3：以往积压补译（当前句无待翻文本时的空档里跑，worker 不空转）。
     // 坑：同句的 final 可能已交付（bestBySeq 有记录）而 backlog 还排在队列里

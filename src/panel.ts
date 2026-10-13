@@ -2387,7 +2387,7 @@ document.querySelectorAll<HTMLButtonElement>('#translateDirRow .seg').forEach(b 
   };
 });
 
-// —— 翻译时机：stream=实时跟句（中间态重译，冷却 0.5s）｜final=仅定稿（句完才翻） ——
+// —— 翻译时机：stream=实时跟句（中间态重译；**上一句回来才发下一句**，不做固定节流）｜final=仅定稿（句完才翻） ——
 function applyTranslateTiming(timing: string) {
   document.querySelectorAll<HTMLButtonElement>('#translateTimingRow .seg').forEach(b => {
     const on = b.dataset.timing === timing;

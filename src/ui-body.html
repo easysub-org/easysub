@@ -226,7 +226,7 @@
         <button type="button" id="helpBtnTranslateTiming" class="help-btn" aria-label="查看帮助" aria-describedby="helpTipTranslateTiming">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         </button>
-        <span class="help-tip flip anchor-right" role="tooltip" id="helpTipTranslateTiming">实时跟句：识别过程中反复重译中间结果，出译文快但更耗 CPU（每 0.5 秒最多一次）；仅定稿：每句说完才翻译一次，最省资源、译文不闪变。设置从下一次启动会话生效。</span>
+        <span class="help-tip flip anchor-right" role="tooltip" id="helpTipTranslateTiming">实时跟句：识别过程中反复重译中间结果，上一句译文回来后立刻发下一句（一次只有一条在途，不并发、不额外限速）；仅定稿：每句说完才翻译一次，最省资源、译文不闪变。设置从下一次启动会话生效。</span>
       </span>
     </div>
     <!-- —— 翻译来源：内置离线模型 / 用户自己的 OpenAI 兼容 API（/v1）——
