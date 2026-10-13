@@ -156,6 +156,12 @@ export class AsrEngine {
    */
   private translateBackoffMs = 500;
   private translateNextAttemptAt = 0;
+  /**
+   * **已交付过定稿**的句号集合（盲审 S2）。不能用 `bestBySeq` 判断"这句翻完了" ——
+   * 流式半截也会写进 `bestBySeq`，于是看门狗放弃 final 之后，backlog 兜底会被静默抑制，
+   * 该句**永远没有定稿译文**（显示与落库都缺）。这里按"定稿是否真的交付过"来判。
+   */
+  private finalDoneBySeq = new Set<number>();
   private translateWarned = false;
 
   // 当前识别句的序号（从 1 起）。随 SENTENCE_DONE 递增，随每次 TRANSLATE 消息带给 worker，
@@ -517,7 +523,8 @@ export class AsrEngine {
     // 坑（丢译文修复）：上一句（seq-1）若已有流式译文但定稿任务还没轮到跑，
     // 旧实现会因"中间态过期"把它整个丢掉，且不再补翻——该句译文永久丢失。
     // 现在把它的"最终文本"以最低优先级（backlog）排队补翻。
-    if (seq - 1 >= 1 && !this.bestBySeq.has(seq - 1)) {
+    if (seq - 1 >= 1 && !this.finalDoneBySeq.has(seq - 1)) {
+      // 判据是**定稿是否交付过**（不是 bestBySeq：流式半截也在里面，会把兜底抑制掉 —— 盲审 S2）
       const prevFinal = this.lastFinalTexts.get(seq - 1);
       // 恢复原样（用户要求"调度完全一致"）：这里就是**先补 backlog**，与加此功能之前逐字相同。
       // （盲审提过"backlog 可能抢占当前句 final"，但那属于原有设计的取舍，不由我改。）
@@ -614,6 +621,7 @@ export class AsrEngine {
       } else {
         this.sink.toDisplay({ type: 'TRANSLATION_FINAL', text, seq: job.seq });
         this.sink.toPanel({ type: 'TRANSLATION_FINAL', text, seq: job.seq });
+        this.finalDoneBySeq.add(job.seq);   // 只有这里标记"定稿已交付"（见字段说明）
       }
       this.log(`[译] 交付 seq=${job.seq}/${job.kind} → "${String(text).slice(0, 30)}"`);
     } else if (m.reason === 'no-model' && !this.translateWarned) {
@@ -627,6 +635,10 @@ export class AsrEngine {
       // 现在只有"缺模型"（上面那支，真永久态）才关门；请求类失败**只告警、继续重试**，
       // 并做 30 秒节流防刷屏。
       const now = Date.now();
+      // 盲审 S1（major）：**失败的 job 必须重新入队**。以前这里只设退避窗口、把 job 丢掉，
+      // 于是"重试"只对**之后新产生**的任务生效 —— 该句最多靠下一句的 backlog 兜一次，
+      // 再失败就永久丢失译文（显示少一句、导出 SRT/TXT 少一行，且没有任何提示）。
+      this.requeueTranslateJob(job.kind, job.seq, job.text);
       // 指数退避（用户要求）：500ms → 1s → 2s … 上限 30s；失败期间的新提交都会等到窗口打开。
       this.translateNextAttemptAt = now + this.translateBackoffMs;
       this.translateBackoffMs = Math.min(this.translateBackoffMs * 2, 30000);
@@ -680,7 +692,7 @@ export class AsrEngine {
       for (let i = 0; i < this.transQueue.length; i++) {
         const j = this.transQueue[i];
         if (j.kind !== 'backlog') continue;
-        if (this.bestBySeq.has(j.seq)) { this.transQueue.splice(i, 1); i--; continue; }
+        if (this.finalDoneBySeq.has(j.seq)) { this.transQueue.splice(i, 1); i--; continue; }
         job = j; idx = i; break;
       }
     }
@@ -735,7 +747,11 @@ export class AsrEngine {
       // 放弃在途请求时**递增代次**：那条迟到的回包（可能半截）从此一律对不上号，
       // 不会被后续任务误当成自己的结果（盲审 major）。
       this.transGen += 1;
+      // 盲审 S2（major）：被放弃的 job 也要**重新入队**，否则该句定稿永远补不回来
+      // （流式半截已进 bestBySeq，会让 backlog 兜底被抑制）。
+      const abandoned = this.inFlight;
       this.inFlight = null;
+      if (abandoned) this.requeueTranslateJob(abandoned.kind, abandoned.seq, abandoned.text);
       this.pumpTranslate();
     }, TRANSLATE_WATCHDOG_MS);
   }
@@ -815,14 +831,40 @@ export class AsrEngine {
   }
 
   // —— 翻译状态整体复位：会话停止 / 测试取消 / worker 重建时调用，防上一场任务串场 ——
+  /**
+   * 把失败/被放弃的翻译任务放回队列（盲审 S1/S2）。
+   * 守住"一次只有一条在途"：只是入队，泵仍受 inFlight 与退避窗口约束。
+   * 定稿任务只在**还没交付过定稿**时才重入队；流式任务只对当前句重投（旧句的中间态没意义）。
+   */
+  private requeueTranslateJob(kind: 'final' | 'stream', seq: number, text: string) {
+    if (!text) return;
+    if (kind === 'stream') {
+      if (seq === this.sentenceSeq) this.streamSlot = { text, seq };
+      return;
+    }
+    if (this.finalDoneBySeq.has(seq)) return;
+    if (this.transQueue.some(j => j.seq === seq && j.kind === 'final')) return;
+    this.transQueue.push({ kind: 'final', seq, text, at: Date.now() });
+  }
+
   private resetTranslationState() {
     this.inFlight = null;
     this.transQueue.length = 0;
     this.streamSlot = null;
     this.bestBySeq.clear();
+    this.finalDoneBySeq.clear();
     this.lastFinalTexts.clear();
     this.sentenceSeq = 1;
     this.transGen++;
+    // 盲审 S3（major，Web 版）：退避状态必须**跨会话复位**。Web 宿主的 engine 实例跨会话复用
+    // （web/host.ts 懒建后不销毁），上一场最后一次失败会把退避推进到最长 30 秒 ——
+    // 用户"改好配置、重启会话"，开头半分钟一个字都不翻，极易被判成随机故障。
+    this.translateBackoffMs = 500;
+    this.translateNextAttemptAt = 0;
+    if (this.streamThrottleTimer) {
+      clearTimeout(this.streamThrottleTimer);
+      this.streamThrottleTimer = null;
+    }
   }
 
   private destroyTranslateWorker() {
