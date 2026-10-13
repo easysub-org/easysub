@@ -939,7 +939,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       // 一起把「翻译来源 + API 配置」送过去：测试翻译是"还没开始识别也想试模型"的场景，
       // 那个 offscreen 文档没跑过 INIT，不带配置就只能按内置模型测（用户实测报 no-model）。
       const prefsR = await chrome.storage.local.get('tmspeech_prefs').catch(() => ({} as any));
-      const api = apiSettingsFromPrefs((prefsR as any)?.tmspeech_prefs || {});
+      const api = msg.api || apiSettingsFromPrefs((prefsR as any)?.tmspeech_prefs || {});
       // 测试前再同步一次规则：用户可能刚改完地址就点测试（避免"先测后生效"的假失败）
       void syncApiOriginRule(api.base);
       translateTestResolvers[id] = sendResponse;

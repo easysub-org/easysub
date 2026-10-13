@@ -2540,6 +2540,12 @@ function buildTranslateNotice() {
 }
 
 async function refreshTranslateStatus() {
+  // 盲审 minor：API 来源下"未选择翻译模型"是**内置模型**的常态，显示出来与用户所选矛盾。
+  if (activeTranslateSource() === 'api') {
+    translateStatus.textContent = tSync(currentLang, 'tapiStatus')
+      .replace('{m}', translateApiFromUi().model || '—');
+    return;
+  }
   try {
     const keys = await listModelKeys();
     translateStatus.textContent = keys.length > 0
@@ -2600,7 +2606,12 @@ btnTestTranslate.onclick = async () => {
   translateStatus.textContent = tSync(currentLang, 'translateTesting');
   let r: any = null;
   try {
-    r = await sendToHost({ type: 'TRANSLATE_TEST', text: sample, direction: dir });
+    r = await sendToHost({
+      type: 'TRANSLATE_TEST', text: sample, direction: dir,
+      // 盲审 minor：测试必须用**表单当前值**。以前只让宿主去读已保存偏好，而 savePrefs 是异步
+      // promise 链 —— 改完地址立刻点测试很可能测到旧配置，还会把会话的实时配置覆盖回旧的。
+      api: translateApiFromUi(),
+    });
   } catch { r = null; }
   translateTesting = false;
   if (translateTestCancelled) return;

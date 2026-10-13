@@ -149,6 +149,15 @@ export class AsrEngine {
   private lastStreamSubmitAt = 0;
   /** 节流窗口结束后补提交（跟句任务被推迟时用）。 */
   private streamThrottleTimer: any = null;
+  /** 待补的上一句定稿（见 handleSentenceDone：final 必须先于 backlog 入队）。 */
+  private pendingPrevFinal: { seq: number; text: string } | null = null;
+  /**
+   * 翻译**失败重试**的退避（用户要求）：第一次等 500ms 再试，之后每次翻倍，上限 30 秒；
+   * 成功一次就回到 500ms。退避期间只**保住队列**、不占在途槽 —— 所以看门狗不会误杀，
+   * 也不会因为一个连不上的地址把整条链路卡死（上一条修复：失败不再永久关停翻译）。
+   */
+  private translateBackoffMs = 500;
+  private translateNextAttemptAt = 0;
   private translateWarned = false;
 
   // 当前识别句的序号（从 1 起）。随 SENTENCE_DONE 递增，随每次 TRANSLATE 消息带给 worker，
@@ -512,7 +521,10 @@ export class AsrEngine {
     // 现在把它的"最终文本"以最低优先级（backlog）排队补翻。
     if (seq - 1 >= 1 && !this.bestBySeq.has(seq - 1)) {
       const prevFinal = this.lastFinalTexts.get(seq - 1);
-      if (prevFinal) this.translateBacklog(seq - 1, prevFinal);
+      // 盲审 minor（优先级倒挂）：以前先补 backlog、再排本句 final，而 `translateBacklog`
+      // 内部会立刻 `pumpTranslate()` —— worker 若刚好空闲，**最低优先级的历史补译会先占住
+      // 在途槽**，用户最想看的当前句定稿反而要多等一整个往返。所以先排 final。
+      if (prevFinal) this.pendingPrevFinal = { seq: seq - 1, text: prevFinal };
     }
     this.lastFinalTexts.set(seq, this.prevSentence);
     for (const k of this.lastFinalTexts.keys()) {
@@ -522,6 +534,12 @@ export class AsrEngine {
     this.sink.toDisplay({ type: 'SENTENCE_DONE', text: this.prevSentence, isFinal: true, seq });
     this.sink.toPanel({ type: 'SENTENCE_DONE', text: this.prevSentence, seq });
     this.translateFinal(this.prevSentence);
+    // 本句定稿已入队**之后**，再补上一句的积压（顺序见上面注释：避免 backlog 抢占在途槽）
+    if (this.pendingPrevFinal) {
+      const p = this.pendingPrevFinal;
+      this.pendingPrevFinal = null;
+      this.translateBacklog(p.seq, p.text);
+    }
     this.sentenceSeq = seq + 1;
   }
 
@@ -595,6 +613,9 @@ export class AsrEngine {
   private onTranslationResult(job: { kind: 'final' | 'stream'; seq: number; text: string }, m: any) {
     const prev = this.bestBySeq.get(job.seq);
     if (m.ok && m.text) {
+      // 成功一次就把退避复位（用户要求：成功回到 500ms）
+      this.translateBackoffMs = 500;
+      this.translateNextAttemptAt = 0;
       if (job.kind !== 'stream' || prev == null) this.bestBySeq.set(job.seq, m.text);
       const text = m.text;
       if (job.kind === 'stream') {
@@ -615,9 +636,18 @@ export class AsrEngine {
       // 现在只有"缺模型"（上面那支，真永久态）才关门；请求类失败**只告警、继续重试**，
       // 并做 30 秒节流防刷屏。
       const now = Date.now();
+      // 指数退避（用户要求）：500ms → 1s → 2s … 上限 30s；失败期间的新提交都会等到窗口打开。
+      this.translateNextAttemptAt = now + this.translateBackoffMs;
+      this.translateBackoffMs = Math.min(this.translateBackoffMs * 2, 30000);
+      if (!this.streamThrottleTimer) {
+        this.streamThrottleTimer = setTimeout(() => {
+          this.streamThrottleTimer = null;
+          this.pumpTranslate();
+        }, Math.max(0, this.translateNextAttemptAt - Date.now()));
+      }
       if (now - this.lastTranslateErrorAt > 30000) {
         this.lastTranslateErrorAt = now;
-        this.log('翻译出错（会自动重试）: ' + m.error);
+        this.log(`翻译出错（${Math.round((this.translateNextAttemptAt - now) / 100) / 10} 秒后重试）: ` + m.error);
       }
     }
     this.dropStaleBest();
@@ -626,6 +656,17 @@ export class AsrEngine {
   // —— 队列泵：worker 空闲时按优先级取下一个任务 ——
   private pumpTranslate() {
     if (!this.translateWorker || !this.translateEnabled || this.inFlight) return;
+    // 失败退避窗口内：不提交，等到点了自动再泵一次（见 translateBackoffMs）
+    const wait = this.translateNextAttemptAt - Date.now();
+    if (wait > 0) {
+      if (!this.streamThrottleTimer) {
+        this.streamThrottleTimer = setTimeout(() => {
+          this.streamThrottleTimer = null;
+          this.pumpTranslate();
+        }, wait);
+      }
+      return;
+    }
     let job: TransJob | null = null;
     let idx = -1;
     let fromSlot = false;
