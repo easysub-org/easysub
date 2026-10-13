@@ -682,7 +682,10 @@ function cleanupAll() {
     // 而且下一场 system/helper 会话复用同一窗口时，旧 mic 的 MIC_CHUNK 会被喂进新管道
     // （系统音频里混进麦克风声音）。tab 会话没有浮窗，但 pendingNotice 也要清掉，
     // 否则以后"不走 START 就开浮窗"的路径会把上一条旧错误回播出去（复核 P2-9）。
-    pendingNotice = null;
+    // 盲审 M1（major）：**这里不能清 pendingNotice** —— 错误发生在浮窗端口还没连上时，
+    // `notifyFloating` 刚把它排进队，同一次收敛的 cleanupAll 就把它清掉 → 窗口留着却
+    // **没有任何原因**（只剩"已停止"）。只有真的投递过（onConnect 补发）或下一次 START
+    // （clearFloatingNotice）才该清。
     if (wasMic) sendToFloating({ type: 'MIC_CAPTURE_STOP' });
   } else {
     closeFloating();

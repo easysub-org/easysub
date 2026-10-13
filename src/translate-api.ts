@@ -92,7 +92,11 @@ export function normalizeChatUrl(base: string): string {
       /^(0\.0\.0\.0|::1|::ffff:127(\.\d+){0,3})$/.test(host) ||      // 通配 / IPv6 回环
       /^10(\.\d+){3}$/.test(host) ||                                 // RFC1918
       /^192\.168(\.\d+){2}$/.test(host) ||
-      /^172\.(1[6-9]|2\d|3[01])(\.\d+){2}$/.test(host);
+      /^172\.(1[6-9]|2\d|3[01])(\.\d+){2}$/.test(host) ||
+      // 盲审 M2：IPv6 链路本地 fe80::/10 与 ULA fc00::/7（含 Tailscale 的 fd7a:…）
+      /^(fe80|fc|fd)[0-9a-f:]*$/.test(host) ||
+      // 单标签主机名（`ollama`、`nas`、`myserver`）：公网 API 不可能只有一个标签，按内网处理
+      /^[a-z0-9-]+$/.test(host);
     url = (isLocal ? 'http://' : 'https://') + url;
   }
   if (/\/chat\/completions$/i.test(url)) return url;
