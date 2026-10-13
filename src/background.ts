@@ -62,13 +62,18 @@ let reconnectTimer: any = null;
 // 代次只在同一次 SW 生命周期内的 START 与清理之间做比对。
 let sessionEpoch = 0;
 /**
- * 我们**自己**关闭 offscreen 文档的时刻（盲审 severe 1）。
- * 为什么需要：START 因配置变化会 closeDocument 重建文档，而它在 `++sessionEpoch` **之后**才关，
- * 于是旧端口 onDisconnect 里取的代次快照恰好等于新代次 —— 守卫失效 → 3 秒后把**刚起来的新会话**
- * 按"后台页面意外关闭"整场拆掉（表现：点开始约 3 秒后自动停止，日志原因是错的，"第一次重启必失败"）。
- * 这里记下自关闭时刻，onDisconnect 看到"刚才是我们自己关的"就不武装重连定时器。
+ * **我们自己**正在关闭的 offscreen 端口（盲审 S3：用时间戳是错的，两个方向都错 ——
+ * ① START 的 !reuseDoc 分支没盖戳，原 bug 仍在；② 2 秒窗口会把"停止后马上重试"的真断开
+ * 一起吞掉 → 会话永远停在 Running、无字幕无错误）。改成**按端口身份**精确识别：
+ * 自带关闭标记的端口断开 = 我们造成的（不武装重连定时器）；其余断开一律正常武装。
  */
-let lastSelfCloseAt = 0;
+const selfClosingPorts = new WeakSet<any>();
+
+/** 关闭 offscreen 文档的**唯一入口**：先给当前端口盖"自关闭"戳，再关。 */
+function selfCloseOffscreen() {
+  if (offscreenPort) selfClosingPorts.add(offscreenPort);
+  try { chrome.offscreen.closeDocument().catch(() => {}); } catch {}
+}
 // 电平快照（最近 60 条，~7s）：波形只在 popup 打开时渲染，LEVEL 消息收不到时
 // 快照兜底，让"每次打开面板"都能恢复上一段波形而不是从空基线重新填充。
 const LEVEL_SNAPSHOT_MAX = 60;
@@ -387,8 +392,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // 测试是临时拉的 offscreen。只有当前没有识别会话、且这个文档不是正在跑会话的文档
       // 时才回收它——会话文档里装着已加载的 WASM/模型，误杀会立刻中断正在进行的识别。
       if (pipelineStatus !== 'Running' && !offscreenCfgKeyInMem) {
-        chrome.offscreen.closeDocument().catch(() => {});
-        lastSelfCloseAt = Date.now();
+        selfCloseOffscreen();
       }
       return;
     }
@@ -549,10 +553,12 @@ chrome.runtime.onConnect.addListener((port) => {
     if (offscreenPort !== port) return;
     offscreenPort = null;
     if (pipelineStatus !== 'Running') return;
-    if (Date.now() - lastSelfCloseAt < 2000) {
-      // 盲审 severe 1：这次断开是我们自己 closeDocument（START 换配置重建文档）造成的，
-      // 绝不能武装"重连超时"定时器 —— 否则 3 秒后会把刚起来的新会话整场拆掉。
-      console.log('[TM BG] 断开来自我们自己的文档重建，不武装重连定时器');
+    if (selfClosingPorts.has(port)) {
+      // 盲审 S3：这次断开是**我们自己**关文档造成的（START 换配置重建 / cleanupAll / 测试回收），
+      // 不能武装"重连超时"定时器 —— 否则 3 秒后会把刚起来的新会话整场拆掉。真断开（崩溃/被回收）
+      // 不会带这个标记，照旧武装。
+      selfClosingPorts.delete(port);
+      console.log('[TM BG] 断开来自我们自己的文档关闭，不武装重连定时器');
       return;
     }
     console.log('[TM BG] offscreen 断开，等待重连...');
@@ -648,8 +654,7 @@ function cleanupAll() {
   if (offscreenPort) {
     try { offscreenPort.postMessage({ type: 'STOP_OFFSCREEN' }); } catch {}
   }
-  chrome.offscreen.closeDocument().catch(() => {});
-  lastSelfCloseAt = Date.now();   // 标记"这次断开是我们自己造成的"（见字段说明）
+  selfCloseOffscreen();
   chrome.storage.session.remove(OFFSCREEN_CFG_KEY).catch(() => {});
   offscreenCfgKeyInMem = null;
   // offscreenPort 不在这里手动置空：closeDocument 触发的 port.onDisconnect 会负责清它，
@@ -667,7 +672,11 @@ function cleanupAll() {
   // 例外：刚发了错误提示时留着它，让用户读得到原因（否则"闪一下就消失"）。用户点提示即关窗
   // （见 overlay 的 onNoticeDismiss）。
   if (keepFloatingForNotice) {
-    keepFloatingForNotice = false;
+    // 坑（盲审 S2，major）：这里**不能**把标志清掉 —— 错误收敛往往不止一次 cleanupAll
+    // （引擎先 `toPanel(ERROR)` 再 `requestStop()` 走 FW_STOP），第一次保留浮窗后标志被清，
+    // 紧随其后的第二次就走到 else 分支 `closeFloating()`，用户只看到"闪一下消失"，
+    // 原因又不可见。现在标志保留到**下一次 START**（见 START_RECOGNITION），
+    // 用户点掉提示本身就会关窗（overlay 的 onNoticeDismiss）。
     // 复核 P0-2（真 bug）：留着浮窗时**必须显式停 mic** —— 浮窗就是麦克风的采集端，
     // 会话已经 Stopped 却没人发 MIC_CAPTURE_STOP，麦克风会一直热着（指示灯常亮），
     // 而且下一场 system/helper 会话复用同一窗口时，旧 mic 的 MIC_CHUNK 会被喂进新管道
@@ -975,6 +984,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'START_RECOGNITION') {
+    keepFloatingForNotice = false;   // 新会话开始：上一场的"保留浮窗读原因"使命结束（盲审 S2）
     // 启动体已抽成独立函数（startRecognition）：tab/system/mic 三态共用同一套
     // 竞态防护（代次核对、旧文档释放等待、pending 投递队列），此处只做通道收口。
     startRecognition(msg, () => sendResponse({}));

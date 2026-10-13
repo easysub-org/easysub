@@ -206,10 +206,16 @@ test('附加请求体字段仍可覆盖推理控制（覆盖语义一致）', ()
   assert.equal(req.body.reasoning_effort, 'low');
 });
 
-test('不带 scheme 的地址：回环默认 http，远程默认 https（防 Key 明文外发）', () => {
+test('不带 scheme 的地址：本机/内网默认 http，公网默认 https', () => {
   assert.equal(normalizeChatUrl('127.0.0.1:11434'), 'http://127.0.0.1:11434/v1/chat/completions');
   assert.equal(normalizeChatUrl('localhost:11434/v1'), 'http://localhost:11434/v1/chat/completions');
-  // 安全：远程地址绝不能因为"没写 scheme"而降级成明文 http（Authorization 会带 Key）
+  assert.equal(normalizeChatUrl('127.1:11434'), 'http://127.1:11434/v1/chat/completions');
+  assert.equal(normalizeChatUrl('0.0.0.0:11434'), 'http://0.0.0.0:11434/v1/chat/completions');
+  // 局域网 Ollama：必须仍然按 http（否则明文 HTTP 服务上必失败 —— 盲审 S1 实测级回归）
+  assert.equal(normalizeChatUrl('192.168.1.5:11434'), 'http://192.168.1.5:11434/v1/chat/completions');
+  assert.equal(normalizeChatUrl('10.0.0.7:11434/v1'), 'http://10.0.0.7:11434/v1/chat/completions');
+  assert.equal(normalizeChatUrl('172.16.3.9:11434'), 'http://172.16.3.9:11434/v1/chat/completions');
+  // 公网域名：绝不能因为"没写 scheme"而降级成明文 http（Authorization 会带 Key）
   assert.equal(normalizeChatUrl('api.deepseek.com/v1'), 'https://api.deepseek.com/v1/chat/completions');
 });
 

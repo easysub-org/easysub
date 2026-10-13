@@ -77,12 +77,20 @@ export function normalizeChatUrl(base: string): string {
   // scheme `localhost:`。更隐蔽的是 originPatternFor 随之返回 null → **把已装的 Origin 规则
   // 撤掉**（表现成"刚还行、突然又 403"）。这里补默认 scheme，兑现文案。
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
-    // 无 scheme 时的默认协议（盲审 severe 2，安全）：**只有回环地址才默认 http**（本地 Ollama
-    // 场景），其余默认 **https** —— 以前一律补 http，用户填 `api.deepseek.com/v1` 会把
-    // `Authorization: Bearer <Key>` 明文发到 http 端点（首个请求就已经把 Key 带出去了）。
-    const hostPart = url.split('/')[0];
-    const loopback = /^(127(\.\d+){3}|localhost|\[?::1\]?)(:\d+)?$/i.test(hostPart);
-    url = (loopback ? 'http://' : 'https://') + url;
+    // 无 scheme 时的默认协议（盲审 S1+S4 合并后的定稿）：
+    //   · **本机与内网地址 → http**（本地/局域网 Ollama 就是这种写法，界面上也承诺了 host:port）；
+    //   · **其余（公网域名）→ https**，否则 `Authorization: Bearer <Key>` 会明文发出去。
+    // 用户想强制某种协议，直接写全 `http://` / `https://` 即可（有 scheme 就不动）。
+    const hostRaw = (url.split('/')[0] || '').replace(/^\[|\]$/g, '').toLowerCase();
+    const host = hostRaw.replace(/:\d+$/, '');
+    const isLocal =
+      /^(localhost\.?|.*\.local)$/.test(host) ||                     // 本机名 / mDNS
+      /^127(\.\d+){0,3}$/.test(host) ||                              // 127.0.0.0/8（含 127.1）
+      /^(0\.0\.0\.0|::1|::ffff:127(\.\d+){0,3})$/.test(host) ||      // 通配 / IPv6 回环
+      /^10(\.\d+){3}$/.test(host) ||                                 // RFC1918
+      /^192\.168(\.\d+){2}$/.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])(\.\d+){2}$/.test(host);
+    url = (isLocal ? 'http://' : 'https://') + url;
   }
   if (/\/chat\/completions$/i.test(url)) return url;
   if (/\/completions$/i.test(url)) return url.replace(/\/completions$/i, '/chat/completions');
