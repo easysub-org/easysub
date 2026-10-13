@@ -187,8 +187,7 @@ test('超时是有界的（慢模型不能把整条翻译队列堵死）', () =>
 // 语义：默认空 → **完全不注入**该字段（不认识它的服务会 400）；填 none → 注入
 // "reasoning_effort": "none"；仍可被附加请求体字段覆盖。
 
-test('推理控制为空时不注入 reasoning_effort', () => {
-  const req = buildApiRequest({ ...baseCfg, reasoning: '' }, 'hi', 'auto');
+test('推理控制为空时不注入 reasoning_effort', () => {  const req = buildApiRequest({ ...baseCfg, reasoning: '' }, 'hi', 'auto');
   assert.equal('reasoning_effort' in req.body, false);
 });
 
@@ -205,6 +204,20 @@ test('附加请求体字段仍可覆盖推理控制（覆盖语义一致）', ()
   const req = buildApiRequest({ ...baseCfg, reasoning: 'none', bodyText: 'reasoning_effort: low' },
                               'hi', 'auto');
   assert.equal(req.body.reasoning_effort, 'low');
+});
+
+test('删除语法 !key：去掉默认注入的字段（o 系/gpt-5 拒绝 max_tokens 与 temperature:0）', () => {
+  const req = buildApiRequest({
+    ...baseCfg,
+    bodyText: '!max_tokens\n!temperature\nmax_completion_tokens: 128',
+  }, 'hi', 'auto');
+  assert.equal('max_tokens' in req.body, false);
+  assert.equal('temperature' in req.body, false);
+  assert.equal(req.body.max_completion_tokens, 128);
+  // 护栏仍然钉死：messages / stream 删不掉
+  const guarded = buildApiRequest({ ...baseCfg, bodyText: '!messages\n!stream' }, 'hi', 'auto');
+  assert.equal(guarded.body.stream, false);
+  assert.equal(guarded.body.messages.length, 2);
 });
 
 test('apiSettingsFromPrefs：默认地址 / 来源 / 六项设置都从持久化偏好里取', () => {  const s = apiSettingsFromPrefs({

@@ -108,6 +108,12 @@ export function parseKeyValueLines(text: string): ParsedLines {
     if (!line || line.startsWith('#') || line.startsWith('//')) continue;
     const at = line.indexOf(':');
     if (at <= 0) {
+      // 「删除默认字段」标记 `!key`：**不需要冒号**（写成 `!max_tokens` 即可）。
+      // 见 buildApiRequest 里的说明：o 系/gpt-5 拒绝我们默认注入的 max_tokens/temperature。
+      if (line.startsWith('!') && line.length > 1) {
+        values[line] = true;
+        continue;
+      }
       problems.push(rawLine);
       continue;
     }
@@ -209,6 +215,17 @@ export function buildApiRequest(cfg: ApiConfig, text: string,
     throw new Error(`附加字段格式不对（应为「key: value」）：${bad}`);
   }
 
+  // 「删除默认字段」语法（盲审 S4，major）：`!max_tokens` 表示把这个键**从请求体里去掉**。
+  // 为什么必须有：我们默认注入 `temperature: 0` 与 `max_tokens`，而 OpenAI 的 o 系 / gpt-5 类
+  // 模型拒绝这两个（要求 `max_completion_tokens`、temperature 只接受默认值）→ 每次请求 400，
+  // 用户只靠"覆盖"救不回来（`max_tokens` 没法"覆盖成不存在"）。附加字段仍是同名覆盖语义。
+  const deletions: string[] = [];
+  for (const k of Object.keys(extraBody)) {
+    if (k.startsWith('!') && k.length > 1) {
+      deletions.push(k.slice(1));
+      delete extraBody[k];
+    }
+  }
   const ignored = Object.keys(extraBody).filter((k) => LOCKED_BODY_KEYS.includes(k));
   const reasoning = String(cfg.reasoning || '').trim();
   const body: Record<string, any> = {
@@ -224,6 +241,10 @@ export function buildApiRequest(cfg: ApiConfig, text: string,
   // 护栏：正文与解析方式固定，用户即使写了也不生效（但会在 ignored 里告诉他）
   delete body.messages;
   delete body.stream;
+  // 删除语法最后生效（`!key`）：默认字段与用户附加字段都能删，但 messages/stream 仍被钉死
+  for (const k of deletions) {
+    if (!LOCKED_BODY_KEYS.includes(k)) delete body[k];
+  }
   body.messages = [
     { role: 'system', content: buildSystemPrompt(direction, text) },
     { role: 'user', content: String(text ?? '') },
