@@ -103,6 +103,10 @@ function setupPort() {
             translationEnabled: msg.translationEnabled,
             translationDirection: msg.translationDirection,
             translationTiming: msg.translationTiming,
+            // 坑（用户实测：选了 OpenAI 却在加载内置模型）：这里是**手挑字段**转给引擎的，
+            // 漏掉 translationApi 就等于永远告诉引擎"用内置模型"——测试翻译也会因此报
+            // "未检测到翻译模型"。新增配置项时务必同步这里（Web 宿主侧是整包透传，不受影响）。
+            translationApi: msg.translationApi,
           });
           // 桌面助手：PCM 由本机助手进程采集，经 WS 直接喂进引擎。
           // 与 mic 的区别：不需要可见页（没有授权框）、不需要 bg 逐块转发（WS 就在本进程里）。
@@ -139,6 +143,9 @@ function setupPort() {
           engine.resendCurrentText();
           break;
         case 'TRANSLATE_TEST':
+          // 必须先把「翻译来源」配置推给引擎/worker（这个文档可能没跑过 INIT）——
+          // 否则用户在面板选了 OpenAI API，测试翻译仍按内置模型跑（用户实测报 no-model）。
+          if (msg.api) engine.setTranslateApiSettings(msg.api);
           void engine.testTranslate(String(msg.text ?? ''), msg.direction || 'auto').then((r) => {
             try { port.postMessage({ type: 'TRANSLATE_TEST_RESULT', payload: { id: msg.id, ...r } }); } catch {}
           });

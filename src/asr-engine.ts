@@ -20,6 +20,10 @@ import { getModelFile } from './model-db';
 import { probeBundledResource } from './platform';
 import type { TranslateApiSettings } from './translate-api';
 
+//: 在途翻译的兜底上限（毫秒）：超过就放行队列 —— 见 armTranslateWatchdog。
+//: 取 25 秒：比 worker 自己的 15 秒请求超时更宽，正常慢模型不会误伤，但"永远 pending"一定会被兜住。
+const TRANSLATE_WATCHDOG_MS = 25000;
+
 // ---- wasm 脚本动态注入（nomodel 支持）----
 // 宿主页面只静态加载 preload.js（仅定义 Module 不拉资源）。三个 wasm 脚本必须等
 // IndexedDB 检查完成后再注入：nomodel 包里没有 .data，需要先把用户导入的模型读成
@@ -135,6 +139,8 @@ export class AsrEngine {
   private translationTiming: 'stream' | 'final' = 'stream';
   /** 翻译来源与 API 配置（worker 内部据此分流；调度完全不知道它的存在）。 */
   private translateApiCfg: TranslateApiSettings | null = null;
+  /** 翻译在途看门狗（见 armTranslateWatchdog 的说明）。 */
+  private translateWatchdog: any = null;
   private translateWarned = false;
 
   // 当前识别句的序号（从 1 起）。随 SENTENCE_DONE 递增，随每次 TRANSLATE 消息带给 worker，
@@ -562,6 +568,7 @@ export class AsrEngine {
       if (this.inFlight && m.seq === this.inFlight.seq && m.gen === this.transGen) {
         const done = this.inFlight;
         this.inFlight = null;
+        this.clearTranslateWatchdog();
         this.onTranslationResult(done, m);
       } else if (this.inFlight) {
         this.log(`[译] 回包对不上号：在途 seq=${this.inFlight.seq}/${this.inFlight.kind}，回包 seq=${m.seq}/${m.kind}，丢弃`);
@@ -628,6 +635,7 @@ export class AsrEngine {
     if (fromSlot) this.streamSlot = null;
     else if (idx >= 0) this.transQueue.splice(idx, 1);
     this.inFlight = { kind: job.kind === 'backlog' ? 'final' : job.kind, seq: job.seq, text: job.text };
+    this.armTranslateWatchdog(job.seq);
     this.log(`[译] 提交 seq=${job.seq}/${job.kind} "${job.text.slice(0, 24)}" 队列余=${this.transQueue.length}${this.streamSlot ? ' 槽有货' : ''}`);
     this.translateWorker.postMessage({
       type: 'TRANSLATE',
@@ -645,6 +653,41 @@ export class AsrEngine {
    * 三处共用：会话配置落地、运行中改设置、点「测试翻译」。**调度完全不知道它的存在** ——
    * worker 内部按 source 分流，TRANSLATE/TRANSLATION 协议与队列语义一行没改。
    */
+  /**
+   * 单独下发「翻译来源」配置（不经 init）。
+   * 为什么需要它：**没跑会话时引擎从没 init() 过** —— 而「测试翻译」恰恰是"还没开始识别，
+   * 先试试模型能不能用"的场景。没有这条通道，测试永远按内置模型跑（用户实测报 no-model）。
+   */
+  setTranslateApiSettings(cfg: TranslateApiSettings) {
+    this.translateApiCfg = cfg;
+    this.sendTranslateConfig();
+  }
+
+  /**
+   * 翻译在途看门狗。**用户实测"用一会就挂了"**：worker 因任何原因不回包（网络请求永远
+   * pending、worker 静默、超时逻辑失效）时，`inFlight` 会永久挂住，整条翻译队列从此停摆，
+   * 而音频/识别还在跑 —— 用户只看到"翻译突然不动了、再也不恢复"。
+   * 这里给在途请求一个上限：到点就放行队列（并记一条，便于排查），下一次提交即可恢复。
+   * 注意：它只是**容错**，不改变调度语义（仍有且仅有一个在途）。
+   */
+  private armTranslateWatchdog(seq: number) {
+    this.clearTranslateWatchdog();
+    this.translateWatchdog = setTimeout(() => {
+      this.translateWatchdog = null;
+      if (!this.inFlight) return;
+      this.log(`[译] ${Math.round(TRANSLATE_WATCHDOG_MS / 1000)} 秒没有回包（seq=${seq}）：放行队列继续，翻译恢复`);
+      this.inFlight = null;
+      this.pumpTranslate();
+    }, TRANSLATE_WATCHDOG_MS);
+  }
+
+  private clearTranslateWatchdog() {
+    if (this.translateWatchdog) {
+      clearTimeout(this.translateWatchdog);
+      this.translateWatchdog = null;
+    }
+  }
+
   private sendTranslateConfig() {
     if (!this.translateWorker) return;
     try {

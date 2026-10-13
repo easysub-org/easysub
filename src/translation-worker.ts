@@ -144,15 +144,39 @@ async function translateViaApi(text: string, direction: 'auto' | 'zh-en' | 'en-z
   const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
   const t0 = Date.now();
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    // 坑（用户实测"用一会就挂了"）：只靠 AbortController 不够 —— Web 版中间有
+    // coi-serviceworker 转发 fetch，abort 信号不一定送达，请求会**永远 pending**，
+    // 于是引擎的 inFlight 永久挂住、整条翻译队列停摆。
+    // 这里再加一层**超时竞速**：到点就抛错并回包，保证队列一定能推进。
+    const res = await Promise.race([
+      fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }),
+      new Promise<Response>((_resolve, reject) => {
+        setTimeout(() => reject(new Error(
+          `翻译超时（>${Math.round(API_TIMEOUT_MS / 1000)} 秒未返回）：模型太慢或服务卡住了 —— 换更小的模型，或检查服务是否还在响应`)),
+          API_TIMEOUT_MS);
+      }),
+    ]);
     if (!res.ok) {
       const detail = (await res.text().catch(() => '')).slice(0, 200);
-      throw new Error(describeApiError(res.status, detail));
+      // 自诊断（用户实测：Web 能过、扩展报 403）：403/401 最常见的原因就是"Key 没带上"
+      // 或"被自定义头覆盖掉了"。这里只列出**头名**（绝不打印值），一眼即可判断。
+      const names = Object.keys(headers);
+      const authNames = names.filter((k) => /authorization|api-key|x-api-key/i.test(k));
+      const diag = `[本次请求头: ${names.join(', ') || '无'}｜鉴权头: ${authNames.join(', ') || '无'}]`;
+      // 本地服务（Ollama 等）会用 **403** 拒绝不认识的来源：Ollama 默认只放行 localhost 页面，
+      // 而扩展发的是 `Origin: chrome-extension://<ID>` —— 于是"Web 版一模一样配置能用、扩展 403"
+      // （用户实测）。这里直接把**实际 Origin 与解法**写进报错，别让用户去猜鉴权。
+      const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i.test(url);
+      const hint = (res.status === 403 && isLocal && !authNames.length)
+        ? ` —— 本地服务拒绝了本扩展的来源（不是 Key 问题）。请用允许扩展来源的方式重启它，`
+          + `例如 Ollama：OLLAMA_ORIGINS=* ollama serve（或把 ${self.location?.origin || 'chrome-extension://<ID>'} 加进 OLLAMA_ORIGINS 列表）`
+        : '';
+      throw new Error(describeApiError(res.status, detail) + ' ' + diag + hint);
     }
     const payload = await res.json().catch(() => null);
     const out = extractTranslation(payload);
@@ -162,6 +186,18 @@ async function translateViaApi(text: string, direction: 'auto' | 'zh-en' | 'en-z
   } catch (err: any) {
     if (err?.name === 'AbortError') {
       throw new Error(`翻译超时（>${Math.round(API_TIMEOUT_MS / 1000)} 秒）：换更小的模型，或把超时留长一点的服务`);
+    }
+    // 浏览器因 CORS/预检失败时，fetch 抛的是 `TypeError: Failed to fetch` —— 对用户毫无信息量。
+    // 换成"谁拦的 + 该怎么放行"，并把**当前来源**打出来（Web 版与扩展版的放行方式完全不同：
+    // 扩展有 host_permissions 且我们删了 Origin；页面受 CORS 全约束、只能服务端放行）。
+    if (/Failed to fetch|NetworkError|Load failed/i.test(String(err?.message || err))) {
+      const origin = (self as any).location?.origin || '';
+      const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:|\/|$)/i.test(url);
+      const hint = isLocal
+        ? ` —— 本地服务需要允许这个来源跨源：${origin}（Ollama 例：OLLAMA_ORIGINS='*' ollama serve，或把它加进列表；`
+          + `注意设了 OLLAMA_ORIGINS 会覆盖默认白名单，别再漏掉页面来源）`
+        : ` —— 服务端可能没有允许浏览器跨源（CORS）。云端 API 常如此：请改用扩展版，或让服务端允许来源 ${origin}`;
+      throw new Error(describeApiError(null, String(err?.message || err)) + hint);
     }
     throw err;
   } finally {

@@ -450,6 +450,11 @@ const translateNotice = $('translateNotice');
 const translateStatus = $('translateStatus');
 const translateDirRow = $('translateDirRow');
 const translateTimingRow = $('translateTimingRow');
+//: 当前翻译来源。**必须声明在这里（元素声明区）**：预加载偏好那段在文件中部就会调用
+//: applyTranslateSource()，声明放晚了会踩 TDZ —— 用户实测表现是
+//: `can't access lexical declaration before initialization` + 面板所有按钮点不动。
+//: 它是**状态变量**、不从 DOM class 反推：见 applyBgMode 注释里那个"全局 .seg 选择器"真 bug。
+let translateSource: 'builtin' | 'api' = 'builtin';
 const TRANSLATE_RELEASES_URL = 'https://github.com/easysub-org/easysub/releases';
 // —— ASR 模型缺失引导（nomodel 版安装包）——
 const ASR_DATA_PATH = 'wasm/sherpa-onnx-wasm-main-asr.data';
@@ -701,6 +706,7 @@ async function loadPrefs() {
   ($opt('inpApiReasoning') as HTMLInputElement | null)!.value = String(prefs.translateApiReasoning ?? '');
   ($opt('inpApiHeaders') as HTMLTextAreaElement | null)!.value = String(prefs.translateApiHeaders ?? '');
   ($opt('inpApiBody') as HTMLTextAreaElement | null)!.value = String(prefs.translateApiBody ?? '');
+  syncApiOriginRule();
   updateTranslateUi();
   // 历史字幕显示译文：默认开（!== false）
   chkTranscriptTr.checked = prefs.transcriptTrEnabled !== false;
@@ -896,14 +902,21 @@ document.querySelectorAll<HTMLButtonElement>('.cmode').forEach(b => {
 });
 
 function applyBgMode(mode: string) {
-  document.querySelectorAll<HTMLButtonElement>('.seg').forEach(b => {
+  // 坑（用户实测的真 bug）：这里以前用**全局 `.seg`** 选择器。于是：
+  //   ① 它给每一个 `.seg` 按钮（含翻译的方向/时机/来源三排）都挂了 onclick；
+  //   ② 点任意一个 → applyBgMode(undefined) → `undefined === undefined` 为真 →
+  //      **把所有没有 data-bgmode 的按钮全设成 active**（截图里七颗按钮全蓝）；
+  //   ③ 而"当前翻译来源"是读 `.active` 判断的 → 永远命中第一个（内置模型）→
+  //      用户选了 OpenAI 也永远走内置模型，测试翻译必然失败。
+  // 修法：只认自己那一排（[data-bgmode]）。新增分段控件时**不要再**用全局 `.seg` 选择器。
+  document.querySelectorAll<HTMLButtonElement>('[data-bgmode]').forEach(b => {
     const on = b.dataset.bgmode === mode;
     b.classList.toggle('active', on);
     b.setAttribute('aria-checked', String(on));
   });
 }
 
-document.querySelectorAll<HTMLButtonElement>('.seg').forEach(b => {
+document.querySelectorAll<HTMLButtonElement>('[data-bgmode]').forEach(b => {
   b.onclick = () => {
     const m = b.dataset.bgmode!;
     applyBgMode(m);
@@ -1261,8 +1274,54 @@ function pushLocalLog(level: string, source: string, message: string,
   if (seen >= 0) panelLogs[seen] = entry;
   else panelLogs.push(entry);
   if (panelLogs.length > 500) panelLogs = panelLogs.slice(-500);
-  if (logsOpen) renderLogs();
+  // 打开时**增量追加**（不是整表重建）：翻译每秒产出好几条日志，整表重建 500 个节点会把
+  // 主线程占满 —— 用户实测"开着日志窗时音频图一卡一卡、译文出来才拉一帧"。
+  if (logsOpen) queueLogAppend(entry);
   return entry;
+}
+
+//: 待追加的日志行 + 每帧只刷一次（日志密集时（跟句翻译）避免每条都触发一次重排）。
+let logPending: PanelLog[] = [];
+let logRaf = 0;
+
+function queueLogAppend(entry: PanelLog) {
+  logPending.push(entry);
+  if (logRaf) return;
+  const flush = () => {
+    logRaf = 0;
+    const batch = logPending;
+    logPending = [];
+    appendLogRows(batch);
+  };
+  logRaf = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame(flush)
+    : (setTimeout(flush, 16) as unknown as number);
+}
+
+/** 增量追加若干行（比整表重建便宜得多）。返回是否真的插入了。 */
+function appendLogRows(entries: PanelLog[]): void {
+  const list = $opt('logList');
+  if (!list || !entries.length) return;
+  const onlyErrors = ($opt('logOnlyErrors') as HTMLInputElement | null)?.checked === true;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+  // 空态占位（"暂无日志"）要先撤掉，否则会和新行叠着显示
+  const emptyEl = list.querySelector('.log-empty');
+  if (emptyEl) emptyEl.remove();
+  let added = 0;
+  for (const entry of entries) {
+    if (onlyErrors && entry.level !== 'warn' && entry.level !== 'error') continue;
+    const line = document.createElement('span');
+    line.className = 'log-line ' + (entry.level === 'error' ? 'error' : entry.level === 'warn' ? 'warn' : '');
+    line.textContent = formatEntry(entry as any);
+    list.appendChild(line);
+    added++;
+  }
+  if (!added) return;
+  // DOM 也要有上限：内存留 500 条，但屏幕上的节点同样不能无限长
+  while (list.childElementCount > 520) list.removeChild(list.firstElementChild!);
+  if (atBottom) list.scrollTop = list.scrollHeight;
+  const count = $opt('logCount');
+  if (count) count.textContent = tSync(currentLang, 'logsCount').replace('{n}', String(visibleLogs().length));
 }
 /**
  * 合并宿主那份与面板本地那份：**按稳定 id 去重**（原来用"时间+来源+内容"，而时间戳每一跳
@@ -2341,17 +2400,21 @@ document.querySelectorAll<HTMLButtonElement>('#translateTimingRow .seg').forEach
 // 运行中改实时翻译设置：只有会话在跑时才需要通知宿主（空闲时改的就是"下次生效"，
 // 由 START 时的配置回源读取）。不通知的话运行中改开关/方向/时机是完全静默无效的
 // ——用户会以为功能坏了（实测反馈过"网页版翻译用不了"）。
-/** 当前选中的翻译来源。 */
+//: 当前翻译来源的声明在**文件顶部元素声明区**（必须早于预加载偏好那段的使用点，否则 TDZ）。
+//: 它是状态变量、不从 DOM class 反推 —— 见 applyBgMode 注释里那个"全局 .seg 选择器"真 bug。
+
+/** 当前选中的翻译来源。**读状态变量而不是 DOM class** —— 上面那个全局 `.seg` bug 正是
+ *  因为"按 class 判断"才让选 API 永远失效；状态量不会再被别的控件污染。 */
 function activeTranslateSource(): 'builtin' | 'api' {
-  const active = document.querySelector('#translateSourceRow .seg.active') as HTMLElement | null;
-  return active?.dataset.source === 'api' ? 'api' : 'builtin';
+  return translateSource === 'api' ? 'api' : 'builtin';
 }
 
-/** 切来源：显示/隐藏 API 表单，并同步内置模型相关的入口（选 API 时它们没有意义）。 */
+/** 切来源：写状态 + 显示/隐藏 API 表单，并同步内置模型相关的入口（选 API 时它们没有意义）。 */
 function applyTranslateSource(src: 'builtin' | 'api') {
+  translateSource = src === 'api' ? 'api' : 'builtin';
   for (const btn of Array.from(document.querySelectorAll('#translateSourceRow .seg'))) {
     const el = btn as HTMLElement;
-    const on = el.dataset.source === src;
+    const on = el.dataset.source === translateSource;
     el.classList.toggle('active', on);
     el.setAttribute('aria-checked', on ? 'true' : 'false');
   }
@@ -2374,6 +2437,16 @@ function translateApiFromUi(): TranslateApiSettings {
   });
 }
 
+/** 让 background 给"当前生效的地址"同步 Origin 规则（扩展版访问本地模型服务必需）。 */
+function syncApiOriginRule(): void {
+  // 必须用**归一化后的** address：地址留空时它等于默认值（11434）。
+  // 坑（用户实测"能用一小会又 403"）：先前直接送输入框原值，空串会被 background 当作
+  // "没有地址"从而**撤掉规则**；而 SW 冷启动/测试路径送的是归一化值、又把规则装回来 ——
+  // 规则一装一撤，表现为"正常一小会突然就不行"。填了地址就稳定（用户就是这样验证的）。
+  const base = translateApiFromUi().base;
+  void sendToHost({ type: 'SYNC_API_ORIGIN', base }).catch(() => {});
+}
+
 /** 持久化 API 表单 + 让运行中的会话当场生效（含"改了来源/模型名不用重启"）。 */
 function saveTranslateApiSettings() {
   const api = translateApiFromUi();
@@ -2386,14 +2459,14 @@ function saveTranslateApiSettings() {
     translateApiHeaders: api.headersText,
     translateApiBody: api.bodyText,
   });
+  syncApiOriginRule();
   updateTranslateUi();
   pushTranslateLive();
 }
 
 /** 语言切换时刷新这一块（与其它翻译控件同一时机）。 */
 function applyTranslateApiLang(): void {
-  const tr = (k: string) => tSync(currentLang, k);
-  for (const [id, key] of [['lbApiBase', 'lbApiBase'], ['lbApiModel', 'lbApiModel'],
+  const tr = (k: string) => tSync(currentLang, k);  for (const [id, key] of [['lbApiBase', 'lbApiBase'], ['lbApiModel', 'lbApiModel'],
                            ['lbApiKey', 'lbApiKey'], ['lbApiReasoning', 'lbApiReasoning'],
                            ['lbApiHeaders', 'lbApiHeaders'], ['lbApiBody', 'lbApiBody']] as const) {
     const el = $opt(id);
@@ -2403,6 +2476,11 @@ function applyTranslateApiLang(): void {
   if (note) note.textContent = tr('tapiNote');
   const tip = $opt('helpTipTranslateApi');
   if (tip) tip.textContent = tr('helpTipTranslateApi');
+  // 用户实测：首屏三排分段控件的选中态有时不对（点一下才恢复）。这里按**当前值**统一重画一遍，
+  // 幂等、且与 i18n 在同一时机执行，不依赖"谁先跑"。
+  applyTranslateDir(activeTranslateDir());
+  applyTranslateTiming(activeTranslateTiming());
+  applyTranslateSource(activeTranslateSource());
 }
 
 function wireTranslateApi(): void {
@@ -2467,6 +2545,11 @@ function updateTranslateUi() {
   translateDirRow.style.display = chkTranslate.checked ? '' : 'none';
   translateTimingRow.style.display = chkTranslate.checked ? '' : 'none';
   translateNotice.style.display = chkTranslate.checked ? '' : 'none';
+  // 「翻译来源」这一排与 API 表单同样只在启用翻译时出现（关着还摆一整套 API 表单很怪）
+  const srcRow = $opt('translateSourceRow');
+  if (srcRow) (srcRow as HTMLElement).style.display = chkTranslate.checked ? '' : 'none';
+  const apiBlock = $opt('tapiBlock');
+  if (apiBlock) apiBlock.hidden = !chkTranslate.checked || activeTranslateSource() !== 'api';
   if (chkTranslate.checked) buildTranslateNotice();
 }
 

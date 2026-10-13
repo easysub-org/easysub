@@ -2,7 +2,7 @@
 // Copyright (C) 2026 hcz1017
 import { t } from './i18n';
 import { createLogBuffer } from './logbus';
-import { apiSettingsFromPrefs } from './translate-api';
+import { apiSettingsFromPrefs, originPatternFor } from './translate-api';
 // 字幕记录的读写全部收敛在 transcript-store（与纯 Web 版共用同一份实现）；
 // 这里只需要追加与挂译文两个入口，其余导出留给未来可能用到的地方。
 import { appendTranscript, attachTranscriptTranslation } from './transcript-store';
@@ -107,6 +107,82 @@ async function restoreLogs() {
 }
 
 void restoreLogs();
+
+// SW 冷启动补装一次 Origin 规则：用户可能早就配好了地址、之后没再改过设置
+// （动态规则本身是持久化的，这里只是保证"升级/首次启用"后也一定装上）。
+void chrome.storage.local.get('tmspeech_prefs')
+  .then((r: any) => syncApiOriginRule(apiSettingsFromPrefs(r?.tmspeech_prefs || {}).base))
+  .catch(() => {});
+
+//: 只维护**一条**动态规则（用户改地址就替换它）。
+const API_ORIGIN_RULE_ID = 90210;
+
+/**
+ * 给"用户配置的翻译 API 地址"去掉 `Origin`/`Referer` 请求头。
+ *
+ * 为什么需要（用户实测）：Ollama 默认只放行 localhost 页面，扩展发的是
+ * `Origin: chrome-extension://<ID>` → **403**，而 Web 版同配置能用。`Origin` 是禁止修改的
+ * 头，JS 层面删不掉，只能用 declarativeNetRequest。
+ * 范围刻意收得很紧：**只这一个 host**、只删这两个头、只作用于本扩展发起的请求
+ * （`initiatorDomains: [chrome.runtime.id]`），对网页与其它域名零影响。
+ * 对非 Ollama 的服务同样安全（云端 API 一般不看 Origin；删掉也无副作用）。
+ */
+async function syncApiOriginRule(base: string) {
+  try {
+    const dnr: any = (chrome as any).declarativeNetRequest;
+    if (!dnr?.updateDynamicRules) return;                 // 老版本/权限缺失：静默跳过，报错文案兜底
+    const pattern = originPatternFor(base);
+    const existing = await dnr.getDynamicRules();
+    const removeRuleIds = existing.filter((r: any) => r.id === API_ORIGIN_RULE_ID).map((r: any) => r.id);
+    if (!pattern) {
+      if (removeRuleIds.length) await dnr.updateDynamicRules({ removeRuleIds });
+      return;
+    }
+    await dnr.updateDynamicRules({
+      removeRuleIds,
+      addRules: [{
+        id: API_ORIGIN_RULE_ID,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders',
+          requestHeaders: [
+            { header: 'Origin', operation: 'remove' },
+            { header: 'Referer', operation: 'remove' },
+          ],
+        },
+        condition: {
+          urlFilter: pattern,
+          // **必须收窄到"本扩展发起的请求"** —— 这条是血的教训：先前为了排查扩展 403
+          // 把它去掉后，规则开始匹配**整个 profile 里所有发往该地址的请求**，包括 :8000
+          // 页面的 CORS 预检：页面预检的 Origin 被删掉 → Ollama 的 CORS 层不接管、落到路由
+          // → /v1/chat/completions 只注册 POST → **405 + Allow: POST** → 页面被 CORS 挡死。
+          // （用户用逐字节复刻证明了这一点：带 Origin → 204 全套 CORS 头；无 Origin → 405。）
+          initiatorDomains: [chrome.runtime.id],
+          resourceTypes: ['xmlhttprequest', 'other'],
+        },
+      }],
+    });
+    // 自检（Chrome 103+）：直接问浏览器"这条规则会不会命中该地址的请求"。
+    // 排查 403 时这一行最有价值 —— 匹配不到就说明规则写法/目标类型不对，而不是 Ollama 的问题。
+    try {
+      const probe = await (dnr as any).testMatchOutcome?.({
+        url: pattern.replace(/\*$/, 'v1/chat/completions'),
+        initiator: `chrome-extension://${chrome.runtime.id}`,
+        resourceType: 'xmlhttprequest',
+      });
+      logLine('info', 'app', `Origin 规则自检：${probe?.matchedRules?.length ? '会命中' : '不会命中'}` +
+        `（${pattern}${probe?.matchedRules?.length ? '' : '，请改用 OLLAMA_ORIGINS'}）`);
+    } catch (e) {
+      // 自检 API 不存在/参数被拒：也要留痕（先前静默 catch，排查 403 时等于没有）
+      logLine('info', 'app', `Origin 规则自检不可用：${e}`);
+    }
+    // 记一条：用户能在「查看所有日志」里确认规则真的装上了（排查 403 时最有用）
+    logLine('info', 'app', `已为该地址移除 Origin/Referer 请求头：${pattern}`);
+  } catch (e) {
+    // 规则下发失败不该影响翻译本身（顶多还是 403，报错文案会告诉用户怎么办）
+    logLine('warn', 'app', '同步翻译 API 的 Origin 规则失败: ' + e);
+  }
+}
 
 function sendToPopup(msg: any) {
   chrome.runtime.sendMessage(msg).catch(() => {});
@@ -826,6 +902,11 @@ async function startRecognition(msg: any, respond: () => void) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'SYNC_API_ORIGIN') {
+    // 面板每次保存 API 设置都同步一次（改地址就替换规则；清空地址就撤掉规则）
+    void syncApiOriginRule(String(msg.base || ''));
+    return;
+  }
   if (msg.type === 'GET_LOGS') {
     sendResponse({ entries: bgLogs.list() });
     return;
@@ -855,8 +936,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       if (!offscreenPort) { sendResponse({ ok: false, error: 'offscreen-not-ready' }); return; }
       const id = ++translateTestSeq;
+      // 一起把「翻译来源 + API 配置」送过去：测试翻译是"还没开始识别也想试模型"的场景，
+      // 那个 offscreen 文档没跑过 INIT，不带配置就只能按内置模型测（用户实测报 no-model）。
+      const prefsR = await chrome.storage.local.get('tmspeech_prefs').catch(() => ({} as any));
+      const api = apiSettingsFromPrefs((prefsR as any)?.tmspeech_prefs || {});
+      // 测试前再同步一次规则：用户可能刚改完地址就点测试（避免"先测后生效"的假失败）
+      void syncApiOriginRule(api.base);
       translateTestResolvers[id] = sendResponse;
-      offscreenPort.postMessage({ type: 'TRANSLATE_TEST', id, text: msg.text, direction: msg.direction });
+      offscreenPort.postMessage({ type: 'TRANSLATE_TEST', id, text: msg.text, direction: msg.direction, api });
     })();
     return true;
   }

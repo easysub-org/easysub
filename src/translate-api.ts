@@ -170,6 +170,17 @@ export function buildSystemPrompt(direction: 'auto' | 'zh-en' | 'en-zh', text: s
   ].join(' ');
 }
 
+/** 从用户填的地址算出 DNR urlFilter 用的 origin 匹配串（`https://host:port/*`）。 */
+export function originPatternFor(base: string): string | null {
+  try {
+    const url = new URL(normalizeChatUrl(base));
+    if (!/^https?:$/.test(url.protocol)) return null;
+    return `${url.origin}/*`;
+  } catch {
+    return null;
+  }
+}
+
 export interface ApiRequest {
   url: string;
   headers: Record<string, string>;
@@ -215,10 +226,26 @@ export function buildApiRequest(cfg: ApiConfig, text: string,
   body.stream = false;
 
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
     ...(cfg.key ? { Authorization: `Bearer ${String(cfg.key).trim()}` } : {}),
     ...extraHeaders,                     // 用户头**覆盖**默认头（例如 Azure 用 api-key、或自定义网关）
   };
+  // —— Content-Type 的取值直接决定"会不会发 CORS 预检" ——
+  // 坑（用户实测：Chrome 下 Web 版报 `Failed to fetch`，DevTools 里是 OPTIONS → 405）：
+  // 本地服务（Ollama 实测）**不处理 OPTIONS**，而 `Content-Type: application/json` **不在
+  // CORS 安全名单里** → 浏览器必发预检 → 405 → 真正的 POST 都发不出去。
+  // 只要请求是"简单请求"就**不发预检**：Content-Type 用安全值 text/plain（服务端按 handler
+  // 绑定 JSON，不依赖这个头；Ollama / LM Studio / llama.cpp 都如此）。
+  // 若用户提供了非安全头（Authorization / 自定义头），预检无法避免 —— 那时只能靠扩展版
+  // （host_permissions 绕过 CORS）或助手转发。
+  const CORS_SAFELISTED = new Set(['accept', 'accept-language', 'content-language']);
+  const extraNames = Object.keys(extraHeaders).map((k) => k.toLowerCase());
+  const needsPreflight = !!String(cfg.key || '').trim()
+    || extraNames.some((k) => k !== 'content-type' && !CORS_SAFELISTED.has(k));
+  const contentType = needsPreflight ? 'application/json' : 'text/plain;charset=UTF-8';
+  // 用户显式写了 Content-Type 就尊重用户（覆盖语义），否则用我们算出来的那个
+  if (!Object.keys(headers).some((k) => k.toLowerCase() === 'content-type')) {
+    headers['Content-Type'] = contentType;
+  }
   return { url, headers, body, ignored };
 }
 

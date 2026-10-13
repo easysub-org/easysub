@@ -8,9 +8,21 @@ import assert from 'node:assert/strict';
 
 import {
   API_TIMEOUT_MS, DEFAULT_API_BASE, apiSettingsFromPrefs, buildApiRequest, buildSystemPrompt,
-  describeApiError, extractTranslation, normalizeChatUrl, parseHeaders, parseKeyValueLines,
-  targetLangFor,
+  describeApiError, extractTranslation, normalizeChatUrl, originPatternFor, parseHeaders,
+  parseKeyValueLines, targetLangFor,
 } from '../src/translate-api.ts';
+
+// —— Origin 规则的范围（扩展版用它去掉 Origin，好让本地模型服务接受扩展请求）——
+// 必须**只**匹配用户填的那个 origin：多匹配一个字符就等于给别的站点开洞。
+test('originPatternFor：只产出该地址的 origin 匹配串', () => {
+  assert.equal(originPatternFor('http://127.0.0.1:11434/v1'), 'http://127.0.0.1:11434/*');
+  assert.equal(originPatternFor('http://127.0.0.1:11434'), 'http://127.0.0.1:11434/*');
+  assert.equal(originPatternFor('http://127.0.0.1:11434/v1/chat/completions'), 'http://127.0.0.1:11434/*');
+  assert.equal(originPatternFor('https://api.example.com/v1'), 'https://api.example.com/*');
+  assert.equal(originPatternFor(''), null);
+  assert.equal(originPatternFor('not a url'), null);
+  assert.equal(originPatternFor('ftp://x/v1'), null, '只允许 http/https');
+});
 
 const baseCfg = {
   base: 'http://127.0.0.1:11434/v1',
@@ -81,7 +93,7 @@ test('buildApiRequest：附加字段**覆盖**默认值（这就是用户要的�
   assert.equal(req.body.model, 'qwen2.5:7b');
   assert.equal(req.body.stream, false);
   assert.equal(req.url, 'http://127.0.0.1:11434/v1/chat/completions');
-  assert.equal(req.headers['Content-Type'], 'application/json');
+  assert.equal(req.headers['Content-Type'], 'text/plain;charset=UTF-8');  // 无鉴权头 → 免预检（见下）
 });
 
 test('两条护栏：messages / stream 不允许被用户覆盖，但会回报 ignored', () => {
@@ -149,6 +161,24 @@ test('describeApiError：常见状态码给人话，网络失败提示 CORS', ()
   assert.match(describeApiError(null, 'Failed to fetch'), /跨源|CORS/);
 });
 
+test('无鉴权头时用 text/plain：**避免 CORS 预检**（本地服务不处理 OPTIONS，实测 405）', () => {
+  const clean = buildApiRequest(baseCfg, 'hi', 'auto');
+  assert.equal(clean.headers['Content-Type'], 'text/plain;charset=UTF-8');
+  // 用户自己写了 Content-Type 时按用户的来（覆盖语义）
+  const forced = buildApiRequest({ ...baseCfg, headersText: 'Content-Type: application/json' }, 'hi', 'auto');
+  assert.equal(forced.headers['Content-Type'], 'application/json');
+});
+
+test('带 Key 或自定义头时只能用 application/json（预检不可避免）', () => {
+  assert.equal(buildApiRequest({ ...baseCfg, key: 'sk-1' }, 'hi', 'auto').headers['Content-Type'],
+               'application/json');
+  assert.equal(buildApiRequest({ ...baseCfg, headersText: 'api-key: abc' }, 'hi', 'auto').headers['Content-Type'],
+               'application/json');
+  // 安全名单里的头不算（Accept 不会触发预检）
+  assert.equal(buildApiRequest({ ...baseCfg, headersText: 'Accept: application/json' }, 'hi', 'auto')
+                 .headers['Content-Type'], 'text/plain;charset=UTF-8');
+});
+
 test('超时是有界的（慢模型不能把整条翻译队列堵死）', () => {
   assert.ok(Number.isFinite(API_TIMEOUT_MS) && API_TIMEOUT_MS > 0 && API_TIMEOUT_MS <= 60000);
 });
@@ -177,8 +207,7 @@ test('附加请求体字段仍可覆盖推理控制（覆盖语义一致）', ()
   assert.equal(req.body.reasoning_effort, 'low');
 });
 
-test('apiSettingsFromPrefs：默认地址 / 来源 / 六项设置都从持久化偏好里取', () => {
-  const s = apiSettingsFromPrefs({
+test('apiSettingsFromPrefs：默认地址 / 来源 / 六项设置都从持久化偏好里取', () => {  const s = apiSettingsFromPrefs({
     translateSource: 'api', translateApiBase: '', translateApiModel: 'qwen2.5:7b',
     translateApiKey: 'sk-x', translateApiHeaders: 'api-key: abc', translateApiBody: 'top_p: 0.9',
     translateApiReasoning: 'none',
