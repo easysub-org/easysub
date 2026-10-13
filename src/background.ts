@@ -133,6 +133,15 @@ async function syncApiOriginRule(base: string) {
     if (!dnr?.updateDynamicRules) return;                 // 老版本/权限缺失：静默跳过，报错文案兜底
     const pattern = originPatternFor(base);
     const existing = await dnr.getDynamicRules();
+    const current = existing.find((r: any) => r.id === API_ORIGIN_RULE_ID);
+    const same = !!current
+      && current.condition?.urlFilter === pattern
+      && Array.isArray(current.condition?.initiatorDomains)
+      && current.condition.initiatorDomains[0] === chrome.runtime.id;
+    // 规则没变化就**什么都不做**：既不重写、也不打日志。
+    // 这条同步会被面板每次保存/测试翻译/SW 冷启动各调一次，早先每次都打一行 →
+    // 用户日志区被"已为该地址移除 Origin/Referer 请求头…"刷屏（实测反馈）。
+    if (same) return;
     const removeRuleIds = existing.filter((r: any) => r.id === API_ORIGIN_RULE_ID).map((r: any) => r.id);
     if (!pattern) {
       if (removeRuleIds.length) await dnr.updateDynamicRules({ removeRuleIds });
@@ -162,21 +171,7 @@ async function syncApiOriginRule(base: string) {
         },
       }],
     });
-    // 自检（Chrome 103+）：直接问浏览器"这条规则会不会命中该地址的请求"。
-    // 排查 403 时这一行最有价值 —— 匹配不到就说明规则写法/目标类型不对，而不是 Ollama 的问题。
-    try {
-      const probe = await (dnr as any).testMatchOutcome?.({
-        url: pattern.replace(/\*$/, 'v1/chat/completions'),
-        initiator: `chrome-extension://${chrome.runtime.id}`,
-        resourceType: 'xmlhttprequest',
-      });
-      logLine('info', 'app', `Origin 规则自检：${probe?.matchedRules?.length ? '会命中' : '不会命中'}` +
-        `（${pattern}${probe?.matchedRules?.length ? '' : '，请改用 OLLAMA_ORIGINS'}）`);
-    } catch (e) {
-      // 自检 API 不存在/参数被拒：也要留痕（先前静默 catch，排查 403 时等于没有）
-      logLine('info', 'app', `Origin 规则自检不可用：${e}`);
-    }
-    // 记一条：用户能在「查看所有日志」里确认规则真的装上了（排查 403 时最有用）
+    // 只在**真的装/换**规则时记一条（用户能据此确认规则已就位，且不再刷屏）
     logLine('info', 'app', `已为该地址移除 Origin/Referer 请求头：${pattern}`);
   } catch (e) {
     // 规则下发失败不该影响翻译本身（顶多还是 403，报错文案会告诉用户怎么办）
