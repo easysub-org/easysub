@@ -61,6 +61,14 @@ let reconnectTimer: any = null;
 // 代次，不匹配立即中止（不再置状态/不发消息/不创建文档）。SW 重启后计数归零无妨：
 // 代次只在同一次 SW 生命周期内的 START 与清理之间做比对。
 let sessionEpoch = 0;
+/**
+ * 我们**自己**关闭 offscreen 文档的时刻（盲审 severe 1）。
+ * 为什么需要：START 因配置变化会 closeDocument 重建文档，而它在 `++sessionEpoch` **之后**才关，
+ * 于是旧端口 onDisconnect 里取的代次快照恰好等于新代次 —— 守卫失效 → 3 秒后把**刚起来的新会话**
+ * 按"后台页面意外关闭"整场拆掉（表现：点开始约 3 秒后自动停止，日志原因是错的，"第一次重启必失败"）。
+ * 这里记下自关闭时刻，onDisconnect 看到"刚才是我们自己关的"就不武装重连定时器。
+ */
+let lastSelfCloseAt = 0;
 // 电平快照（最近 60 条，~7s）：波形只在 popup 打开时渲染，LEVEL 消息收不到时
 // 快照兜底，让"每次打开面板"都能恢复上一段波形而不是从空基线重新填充。
 const LEVEL_SNAPSHOT_MAX = 60;
@@ -380,6 +388,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // 时才回收它——会话文档里装着已加载的 WASM/模型，误杀会立刻中断正在进行的识别。
       if (pipelineStatus !== 'Running' && !offscreenCfgKeyInMem) {
         chrome.offscreen.closeDocument().catch(() => {});
+        lastSelfCloseAt = Date.now();
       }
       return;
     }
@@ -540,6 +549,12 @@ chrome.runtime.onConnect.addListener((port) => {
     if (offscreenPort !== port) return;
     offscreenPort = null;
     if (pipelineStatus !== 'Running') return;
+    if (Date.now() - lastSelfCloseAt < 2000) {
+      // 盲审 severe 1：这次断开是我们自己 closeDocument（START 换配置重建文档）造成的，
+      // 绝不能武装"重连超时"定时器 —— 否则 3 秒后会把刚起来的新会话整场拆掉。
+      console.log('[TM BG] 断开来自我们自己的文档重建，不武装重连定时器');
+      return;
+    }
     console.log('[TM BG] offscreen 断开，等待重连...');
     // 坑：只判 pipelineStatus==='Running' 不够——"Running 状态下重启会话"（START 里
     // 因配置变化而 closeDocument 重建）会在旧端口断开处武装本定时器，3 秒后把刚起来的
@@ -634,6 +649,7 @@ function cleanupAll() {
     try { offscreenPort.postMessage({ type: 'STOP_OFFSCREEN' }); } catch {}
   }
   chrome.offscreen.closeDocument().catch(() => {});
+  lastSelfCloseAt = Date.now();   // 标记"这次断开是我们自己造成的"（见字段说明）
   chrome.storage.session.remove(OFFSCREEN_CFG_KEY).catch(() => {});
   offscreenCfgKeyInMem = null;
   // offscreenPort 不在这里手动置空：closeDocument 触发的 port.onDisconnect 会负责清它，

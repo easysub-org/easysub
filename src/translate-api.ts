@@ -76,7 +76,14 @@ export function normalizeChatUrl(base: string): string {
   // 根本走不通 —— `new URL('127.0.0.1:11434')` 直接失败、`'localhost:11434'` 会被当成
   // scheme `localhost:`。更隐蔽的是 originPatternFor 随之返回 null → **把已装的 Origin 规则
   // 撤掉**（表现成"刚还行、突然又 403"）。这里补默认 scheme，兑现文案。
-  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = 'http://' + url;
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+    // 无 scheme 时的默认协议（盲审 severe 2，安全）：**只有回环地址才默认 http**（本地 Ollama
+    // 场景），其余默认 **https** —— 以前一律补 http，用户填 `api.deepseek.com/v1` 会把
+    // `Authorization: Bearer <Key>` 明文发到 http 端点（首个请求就已经把 Key 带出去了）。
+    const hostPart = url.split('/')[0];
+    const loopback = /^(127(\.\d+){3}|localhost|\[?::1\]?)(:\d+)?$/i.test(hostPart);
+    url = (loopback ? 'http://' : 'https://') + url;
+  }
   if (/\/chat\/completions$/i.test(url)) return url;
   if (/\/completions$/i.test(url)) return url.replace(/\/completions$/i, '/chat/completions');
   if (!/\/v\d+$/i.test(url)) url += '/v1';

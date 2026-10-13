@@ -206,6 +206,13 @@ test('附加请求体字段仍可覆盖推理控制（覆盖语义一致）', ()
   assert.equal(req.body.reasoning_effort, 'low');
 });
 
+test('不带 scheme 的地址：回环默认 http，远程默认 https（防 Key 明文外发）', () => {
+  assert.equal(normalizeChatUrl('127.0.0.1:11434'), 'http://127.0.0.1:11434/v1/chat/completions');
+  assert.equal(normalizeChatUrl('localhost:11434/v1'), 'http://localhost:11434/v1/chat/completions');
+  // 安全：远程地址绝不能因为"没写 scheme"而降级成明文 http（Authorization 会带 Key）
+  assert.equal(normalizeChatUrl('api.deepseek.com/v1'), 'https://api.deepseek.com/v1/chat/completions');
+});
+
 test('删除语法 !key：去掉默认注入的字段（o 系/gpt-5 拒绝 max_tokens 与 temperature:0）', () => {
   const req = buildApiRequest({
     ...baseCfg,
