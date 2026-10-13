@@ -1269,14 +1269,15 @@ function pushLocalLog(level: string, source: string, message: string,
     message: normalizeMessage(message),
   };
   // 按 id 幂等：宿主可能把同一条回播两次（或我们自己先记了、宿主再广播），
-  // 同一个 id 就地替换而不是又 push 一条 —— 日志窗里"同一条出现两遍"是最招人烦的。
+  // 同一个 id 就地替换而不是又 push 一条。
   const seen = panelLogs.findIndex((e) => e.id === entry.id);
-  if (seen >= 0) panelLogs[seen] = entry;
-  else panelLogs.push(entry);
+  const isNew = seen < 0;
+  if (isNew) panelLogs.push(entry);
+  else panelLogs[seen] = entry;
   if (panelLogs.length > 500) panelLogs = panelLogs.slice(-500);
-  // 打开时**增量追加**（不是整表重建）：翻译每秒产出好几条日志，整表重建 500 个节点会把
-  // 主线程占满 —— 用户实测"开着日志窗时音频图一卡一卡、译文出来才拉一帧"。
-  if (logsOpen) queueLogAppend(entry);
+  // 打开时**增量追加**，但**只在真的是新条目时**：命中已存在的 id（我们自己记过、宿主又回播）
+  // 时数组去重了、DOM 却会多出一行 —— 盲审 P1-1：计数 N 条、屏幕 2N 行，直接打脸这个 feature。
+  if (logsOpen && isNew) queueLogAppend(entry);
   return entry;
 }
 
@@ -1304,19 +1305,18 @@ function appendLogRows(entries: PanelLog[]): void {
   if (!list || !entries.length) return;
   const onlyErrors = ($opt('logOnlyErrors') as HTMLInputElement | null)?.checked === true;
   const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
-  // 空态占位（"暂无日志"）要先撤掉，否则会和新行叠着显示
+  const pending = entries.filter((e) => !onlyErrors || e.level === 'warn' || e.level === 'error');
+  // 盲审 P2-1：**没有真的要加行时不要摘占位** —— 勾着"只看错误/警告"且无匹配时，
+  // 一条 info 日志到达会把"没有符合条件的日志"抹掉，留下空白框 + "共 0 条"。
+  if (!pending.length) return;
   const emptyEl = list.querySelector('.log-empty');
   if (emptyEl) emptyEl.remove();
-  let added = 0;
-  for (const entry of entries) {
-    if (onlyErrors && entry.level !== 'warn' && entry.level !== 'error') continue;
+  for (const entry of pending) {
     const line = document.createElement('span');
     line.className = 'log-line ' + (entry.level === 'error' ? 'error' : entry.level === 'warn' ? 'warn' : '');
     line.textContent = formatEntry(entry as any);
     list.appendChild(line);
-    added++;
   }
-  if (!added) return;
   // DOM 也要有上限：内存留 500 条，但屏幕上的节点同样不能无限长
   while (list.childElementCount > 520) list.removeChild(list.firstElementChild!);
   if (atBottom) list.scrollTop = list.scrollHeight;
@@ -1408,6 +1408,14 @@ function closeLogs(): void {
 
 function clearLogs(): void {
   panelLogs = [];
+  // 盲审 P1-3：清空必须**原子** —— 当帧已入队、还没被 rAF 刷出去的行也要丢掉，
+  // 否则点完"清空"旧行又会冒出来（计数 0 与可见行数矛盾）。
+  logPending = [];
+  if (logRaf) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(logRaf);
+    else clearTimeout(logRaf);
+    logRaf = 0;
+  }
   // 作废在途的 GET_LOGS 响应：否则"打开后立刻清空"时，已经发出、稍后才 resolve 的那份
   // 会把它 mergeLogs 回来（看起来清空没生效、老日志又活了）。独立审查 B9。
   logsClearedAt = Date.now();
@@ -2418,8 +2426,9 @@ function applyTranslateSource(src: 'builtin' | 'api') {
     el.classList.toggle('active', on);
     el.setAttribute('aria-checked', on ? 'true' : 'false');
   }
-  const block = $opt('tapiBlock');
-  if (block) block.hidden = src !== 'api';
+  // 注意：**不要在这里动 tapiBlock 的显隐** —— 它的唯一主人是 `updateTranslateUi()`。
+  // 这里以前写 `block.hidden = src !== 'api'`，而本函数会在每次打开面板/切语言时被调用
+  // （经 applyTranslateApiLang）→ 用户"关掉翻译后表单隐藏、重开面板又冒出来"（用户实测）。
   const pick = $opt('btnPickModel');
   if (pick) (pick as HTMLElement).hidden = src === 'api';
 }
@@ -2736,7 +2745,8 @@ onMessageFromHost((msg) => {
       // 宿主广播的新日志（它自己/引擎/助手那几条）。**必须沿用它的 id/t**：
       // 上一轮我以为"跳过 source==='panel'"就够了，但 helper/engine 这类来源仍会在面板本地被
       // 重新盖一个新 id → 按 id 去重永远配不上 → 日志窗照旧一行两遍（复核 P0-1，必现）。
-      if (msg.entry) {
+      // 另外（盲审 P1-3）：清空之后到达的旧回播要丢掉（按时间戳判），否则"清空"不原子。
+      if (msg.entry && (Number(msg.entry.t) || 0) >= logsClearedAt) {
         pushLocalLog(msg.entry.level || 'info', msg.entry.source || 'app', msg.entry.message || '',
                      { t: msg.entry.t, id: msg.entry.id });
       }

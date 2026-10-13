@@ -324,6 +324,11 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       if (m?.type === 'MIC_RESULT' && m.ok !== true) {
+        // 盲审 P1-2/P2-2：mic 失败是**最常见**的错误，但它以前既不进日志缓冲、也没留住浮窗
+        // （浮窗正是授权弹框所在窗口）—— 用户只看到权限 UI 一闪，popup 已关，什么都没有。
+        logLine('error', 'app', '麦克风采集失败：' + String(m.error || '未知原因'));
+        keepFloatingForNotice = true;
+        notifyFloating('error', '麦克风采集失败：' + String(m.error || '未知原因'));
         // 文案走 i18n（双语）：权限被拒 / 无设备（系统禁用时 Chrome 不弹授权框直接拒，
         // NotFoundError 单列给排查指引）/ 被占用 / 其它失败分开表述；
         // micFailure 标记让面板把这类启动失败升级为模态（状态栏一行小字不够醒目）

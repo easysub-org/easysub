@@ -72,6 +72,11 @@ export function normalizeChatUrl(base: string): string {
   if (!raw) throw new Error('API 地址为空');
   // 允许用户直接粘完整端点；也允许只填 host:port
   let url = raw.replace(/\/+$/, '');
+  // 坑（盲审 major）：文档一直承诺"地址填 host:port 或到 /v1 都行"，但无 scheme 的输入
+  // 根本走不通 —— `new URL('127.0.0.1:11434')` 直接失败、`'localhost:11434'` 会被当成
+  // scheme `localhost:`。更隐蔽的是 originPatternFor 随之返回 null → **把已装的 Origin 规则
+  // 撤掉**（表现成"刚还行、突然又 403"）。这里补默认 scheme，兑现文案。
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) url = 'http://' + url;
   if (/\/chat\/completions$/i.test(url)) return url;
   if (/\/completions$/i.test(url)) return url.replace(/\/completions$/i, '/chat/completions');
   if (!/\/v\d+$/i.test(url)) url += '/v1';
@@ -225,10 +230,20 @@ export function buildApiRequest(cfg: ApiConfig, text: string,
   ];
   body.stream = false;
 
-  const headers: Record<string, string> = {
-    ...(cfg.key ? { Authorization: `Bearer ${String(cfg.key).trim()}` } : {}),
-    ...extraHeaders,                     // 用户头**覆盖**默认头（例如 Azure 用 api-key、或自定义网关）
+  // HTTP 头名大小写不敏感：这里按小写归一化后再合并，否则「Key 走默认 Authorization」
+  // + 「用户写小写 authorization: …」会同时存在两个键 → fetch 按规范**追加**成
+  // `Authorization: Bearer sk-…, Api-Key …` → 401/403（盲审 minor，且与下面 Content-Type
+  // 的大小写不敏感判断自相矛盾）。
+  const headers: Record<string, string> = {};
+  const setHeader = (name: string, value: string) => {
+    const lower = name.toLowerCase();
+    for (const existing of Object.keys(headers)) {
+      if (existing.toLowerCase() === lower) delete headers[existing];
+    }
+    headers[name] = value;
   };
+  if (String(cfg.key || '').trim()) setHeader('Authorization', `Bearer ${String(cfg.key).trim()}`);
+  for (const [k, v] of Object.entries(extraHeaders)) setHeader(k, v);
   // —— Content-Type 的取值直接决定"会不会发 CORS 预检" ——
   // 坑（用户实测：Chrome 下 Web 版报 `Failed to fetch`，DevTools 里是 OPTIONS → 405）：
   // 本地服务（Ollama 实测）**不处理 OPTIONS**，而 `Content-Type: application/json` **不在

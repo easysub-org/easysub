@@ -23,6 +23,10 @@ import type { TranslateApiSettings } from './translate-api';
 //: 在途翻译的兜底上限（毫秒）：超过就放行队列 —— 见 armTranslateWatchdog。
 //: 取 25 秒：比 worker 自己的 15 秒请求超时更宽，正常慢模型不会误伤，但"永远 pending"一定会被兜住。
 const TRANSLATE_WATCHDOG_MS = 25000;
+//: 「实时跟句」的最小提交间隔。UI 与 README 一直承诺"每 0.5 秒最多一次"，而实现是
+//: "worker 一空闲就提交"（本地快模型可达 3–10 次/秒）—— 盲审把它列为 major：
+//: 与用户可见文案矛盾，云端 API 上还是真金白银，并会撞 429 触发失败。
+const STREAM_MIN_INTERVAL_MS = 500;
 
 // ---- wasm 脚本动态注入（nomodel 支持）----
 // 宿主页面只静态加载 preload.js（仅定义 Module 不拉资源）。三个 wasm 脚本必须等
@@ -141,6 +145,12 @@ export class AsrEngine {
   private translateApiCfg: TranslateApiSettings | null = null;
   /** 翻译在途看门狗（见 armTranslateWatchdog 的说明）。 */
   private translateWatchdog: any = null;
+  /** 上次翻译**出错**的时间：失败只告警、不关门（30 秒节流），见 onTranslationResult。 */
+  private lastTranslateErrorAt = 0;
+  /** 上次提交「跟句」任务的时间：真实节流用，见 STREAM_MIN_INTERVAL_MS。 */
+  private lastStreamSubmitAt = 0;
+  /** 节流窗口结束后补提交（跟句任务被推迟时用）。 */
+  private streamThrottleTimer: any = null;
   private translateWarned = false;
 
   // 当前识别句的序号（从 1 起）。随 SENTENCE_DONE 递增，随每次 TRANSLATE 消息带给 worker，
@@ -565,7 +575,10 @@ export class AsrEngine {
       // 整体丢弃（表现为一条译文都出不来）。worker 原样回传 seq/gen：串行单在途下，
       // 同 seq 的回包只可能来自当前请求；gen 挡住跨会话的撞号回包。
       if (e.target !== this.translateWorker) return;
-      if (this.inFlight && m.seq === this.inFlight.seq && m.gen === this.transGen) {
+      if (this.inFlight && m.seq === this.inFlight.seq && m.gen === this.transGen
+          // 盲审 major：只看 seq+gen 时，看门狗放行后新提交的 final 会被**旧的 stream 回包**
+          // 撞上（同句同代次）→ 半截流式译文被当定稿交付并永久落库。kind 也要对上。
+          && (m.kind ?? 'final') === this.inFlight.kind) {
         const done = this.inFlight;
         this.inFlight = null;
         this.clearTranslateWatchdog();
@@ -597,9 +610,17 @@ export class AsrEngine {
       this.translateWarned = true;
       // 保留发布页地址：用户没有其它自助恢复途径，日志是唯一告知渠道（扩展侧原文如此）
       this.log('翻译不可用：未检测到翻译模型。请在面板"实时翻译"中点击"选择模型"安装官方模型包（github.com/easysub-org/easysub/releases）');
-    } else if (m.error && !this.translateWarned) {
-      this.translateWarned = true;
-      this.log('翻译出错: ' + m.error);
+    } else if (m.error) {
+      // 坑（盲审 blocker，也是用户"用一会就挂了"的元凶之一）：以前**任何一次**失败都把
+      // `translateWarned` 永久立起 → 一次 429/超时/CORS/格式错就把**整场会话**的翻译关停，
+      // 而唯一线索是一行默认折叠的日志（扩展版点开始后 popup 已关闭，用户看不到）。
+      // 现在只有"缺模型"（上面那支，真永久态）才关门；请求类失败**只告警、继续重试**，
+      // 并做 30 秒节流防刷屏。
+      const now = Date.now();
+      if (now - this.lastTranslateErrorAt > 30000) {
+        this.lastTranslateErrorAt = now;
+        this.log('翻译出错（会自动重试）: ' + m.error);
+      }
     }
     this.dropStaleBest();
   }
@@ -614,10 +635,23 @@ export class AsrEngine {
     for (let i = 0; i < this.transQueue.length; i++) {
       if (this.transQueue[i].kind === 'final') { job = this.transQueue[i]; idx = i; break; }
     }
-    // 优先级 2：实时流式——无人工延迟：worker 空闲且槽里有最新中间态就立即提交。
+    // 优先级 2：实时流式——**受真实节流**（见 STREAM_MIN_INTERVAL_MS）：
+    // 文案承诺"每 0.5 秒最多一次"，先前是"worker 一空闲立刻提交"，快模型能到 3–10 次/秒。
+    // 仍然优先于积压补译（下面那支），只是把提交频率限制住；被推迟的最新中间态留在
+    // streamSlot 里，窗口一到就补提交。
     if (!job && this.streamSlot && this.translationTiming === 'stream') {
-      job = { kind: 'stream', seq: this.streamSlot.seq, text: this.streamSlot.text, at: Date.now() };
-      fromSlot = true;
+      const wait = STREAM_MIN_INTERVAL_MS - (Date.now() - this.lastStreamSubmitAt);
+      if (wait > 0) {
+        if (!this.streamThrottleTimer) {
+          this.streamThrottleTimer = setTimeout(() => {
+            this.streamThrottleTimer = null;
+            this.pumpTranslate();
+          }, wait);
+        }
+      } else {
+        job = { kind: 'stream', seq: this.streamSlot.seq, text: this.streamSlot.text, at: Date.now() };
+        fromSlot = true;
+      }
     }
     // 优先级 3：以往积压补译（当前句无待翻文本时的空档里跑，worker 不空转）。
     // 坑：同句的 final 可能已交付（bestBySeq 有记录）而 backlog 还排在队列里
@@ -636,7 +670,10 @@ export class AsrEngine {
     else if (idx >= 0) this.transQueue.splice(idx, 1);
     this.inFlight = { kind: job.kind === 'backlog' ? 'final' : job.kind, seq: job.seq, text: job.text };
     this.armTranslateWatchdog(job.seq);
-    this.log(`[译] 提交 seq=${job.seq}/${job.kind} "${job.text.slice(0, 24)}" 队列余=${this.transQueue.length}${this.streamSlot ? ' 槽有货' : ''}`);
+    if (this.inFlight.kind === 'stream') this.lastStreamSubmitAt = Date.now();
+    // 坑（盲审 minor）：这里以前每次提交都打一行（含原文前 24 字）→ 跟句模式下每秒数条，
+    // 500 条环形缓冲约 50 秒就被冲空，用户点开日志窗想查的"翻译出错"早被挤没了；原文进
+    // storage.session 还扩大了隐私面。交付那一条保留，提交不再打。
     this.translateWorker.postMessage({
       type: 'TRANSLATE',
       text: job.text,
@@ -676,6 +713,9 @@ export class AsrEngine {
       this.translateWatchdog = null;
       if (!this.inFlight) return;
       this.log(`[译] ${Math.round(TRANSLATE_WATCHDOG_MS / 1000)} 秒没有回包（seq=${seq}）：放行队列继续，翻译恢复`);
+      // 放弃在途请求时**递增代次**：那条迟到的回包（可能半截）从此一律对不上号，
+      // 不会被后续任务误当成自己的结果（盲审 major）。
+      this.transGen += 1;
       this.inFlight = null;
       this.pumpTranslate();
     }, TRANSLATE_WATCHDOG_MS);
