@@ -147,10 +147,8 @@ export class AsrEngine {
   private lastTranslateErrorAt = 0;
   /** 上次提交「跟句」任务的时间（仅诊断用）。 */
   private lastStreamSubmitAt = 0;
-  /** 节流窗口结束后补提交（跟句任务被推迟时用）。 */
+  /** 退避/补泵共用的定时器。 */
   private streamThrottleTimer: any = null;
-  /** 待补的上一句定稿（见 handleSentenceDone：final 必须先于 backlog 入队）。 */
-  private pendingPrevFinal: { seq: number; text: string } | null = null;
   /**
    * 翻译**失败重试**的退避（用户要求）：第一次等 500ms 再试，之后每次翻倍，上限 30 秒；
    * 成功一次就回到 500ms。退避期间只**保住队列**、不占在途槽 —— 所以看门狗不会误杀，
@@ -521,10 +519,9 @@ export class AsrEngine {
     // 现在把它的"最终文本"以最低优先级（backlog）排队补翻。
     if (seq - 1 >= 1 && !this.bestBySeq.has(seq - 1)) {
       const prevFinal = this.lastFinalTexts.get(seq - 1);
-      // 盲审 minor（优先级倒挂）：以前先补 backlog、再排本句 final，而 `translateBacklog`
-      // 内部会立刻 `pumpTranslate()` —— worker 若刚好空闲，**最低优先级的历史补译会先占住
-      // 在途槽**，用户最想看的当前句定稿反而要多等一整个往返。所以先排 final。
-      if (prevFinal) this.pendingPrevFinal = { seq: seq - 1, text: prevFinal };
+      // 恢复原样（用户要求"调度完全一致"）：这里就是**先补 backlog**，与加此功能之前逐字相同。
+      // （盲审提过"backlog 可能抢占当前句 final"，但那属于原有设计的取舍，不由我改。）
+      if (prevFinal) this.translateBacklog(seq - 1, prevFinal);
     }
     this.lastFinalTexts.set(seq, this.prevSentence);
     for (const k of this.lastFinalTexts.keys()) {
@@ -534,12 +531,6 @@ export class AsrEngine {
     this.sink.toDisplay({ type: 'SENTENCE_DONE', text: this.prevSentence, isFinal: true, seq });
     this.sink.toPanel({ type: 'SENTENCE_DONE', text: this.prevSentence, seq });
     this.translateFinal(this.prevSentence);
-    // 本句定稿已入队**之后**，再补上一句的积压（顺序见上面注释：避免 backlog 抢占在途槽）
-    if (this.pendingPrevFinal) {
-      const p = this.pendingPrevFinal;
-      this.pendingPrevFinal = null;
-      this.translateBacklog(p.seq, p.text);
-    }
     this.sentenceSeq = seq + 1;
   }
 
