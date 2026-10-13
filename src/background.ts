@@ -787,6 +787,9 @@ async function startRecognition(msg: any, respond: () => void) {
       if (!offscreenPort) reuseDoc = false; // 连不上 → 降级为重建，避免 INIT 投递不进去的静默失败
     }
     if (!reuseDoc) {
+      // 盲审（major）：这条分支必须也盖"自关闭"戳，否则旧断开会武装 3 秒重连定时器 ——
+      // 而本次 START 已自增过 sessionEpoch，代次守卫恒不生效 → 3 秒后把刚起来的会话整场拆掉。
+      if (offscreenPort) selfClosingPorts.add(offscreenPort);
       await chrome.offscreen.closeDocument().catch(() => {});
       if (stale()) { respond(); return; }
       // closeDocument 会触发 onDisconnect 置空 offscreenPort

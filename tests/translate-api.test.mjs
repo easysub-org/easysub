@@ -211,6 +211,9 @@ test('不带 scheme 的地址：本机/内网默认 http，公网默认 https', 
   assert.equal(normalizeChatUrl('localhost:11434/v1'), 'http://localhost:11434/v1/chat/completions');
   assert.equal(normalizeChatUrl('127.1:11434'), 'http://127.1:11434/v1/chat/completions');
   assert.equal(normalizeChatUrl('0.0.0.0:11434'), 'http://0.0.0.0:11434/v1/chat/completions');
+  // 方括号 IPv6（带端口才坏过：先剥端口再剥括号）
+  assert.equal(normalizeChatUrl('[::1]:11434'), 'http://[::1]:11434/v1/chat/completions');
+  assert.equal(normalizeChatUrl('[::ffff:127.0.0.1]:11434'), 'http://[::ffff:127.0.0.1]:11434/v1/chat/completions');
   // 局域网 Ollama：必须仍然按 http（否则明文 HTTP 服务上必失败 —— 盲审 S1 实测级回归）
   assert.equal(normalizeChatUrl('192.168.1.5:11434'), 'http://192.168.1.5:11434/v1/chat/completions');
   assert.equal(normalizeChatUrl('10.0.0.7:11434/v1'), 'http://10.0.0.7:11434/v1/chat/completions');

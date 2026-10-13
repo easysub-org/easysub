@@ -81,8 +81,11 @@ export function normalizeChatUrl(base: string): string {
     //   · **本机与内网地址 → http**（本地/局域网 Ollama 就是这种写法，界面上也承诺了 host:port）；
     //   · **其余（公网域名）→ https**，否则 `Authorization: Bearer <Key>` 会明文发出去。
     // 用户想强制某种协议，直接写全 `http://` / `https://` 即可（有 scheme 就不动）。
-    const hostRaw = (url.split('/')[0] || '').replace(/^\[|\]$/g, '').toLowerCase();
-    const host = hostRaw.replace(/:\d+$/, '');
+    // 顺序很重要（盲审）：**先剥端口，再剥方括号** —— `[::1]:11434` 若先剥括号，`/^\[|\]$/g`
+    // 只会去掉行首的 `[`（`]` 后面还有 `:11434`），得到 `::1]:11434` → 判成公网 → 强制 https
+    // → 打在明文 HTTP 服务上整场连不上，报错还指向 CORS（用户无法自查）。
+    const authority = (url.split('/')[0] || '').toLowerCase();
+    const host = authority.replace(/:\d+$/, '').replace(/^\[|\]$/g, '');
     const isLocal =
       /^(localhost\.?|.*\.local)$/.test(host) ||                     // 本机名 / mDNS
       /^127(\.\d+){0,3}$/.test(host) ||                              // 127.0.0.0/8（含 127.1）
