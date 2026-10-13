@@ -553,17 +553,14 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       console.log('[TM BG] 重连超时，清理');
-      // 此路径不走 cleanupAll，但同样要作废在途的 START 异步体，防止超时清理被残余启动代码"复活"。
-      sessionEpoch++;
-      pipelineStatus = 'Stopped';
-      if (captureTabId) {
-        sendToTab(captureTabId, { type: 'OVERLAY_TOGGLE', visible: false });
-        captureTabId = null;
-      }
-      chrome.storage.session.remove(PENDING_KEY);
-      persistSession();
-      sendToPopup({ type: 'STATUS_CHANGED', status: 'Stopped' });
-      sendToPopup({ type: 'ERROR', message: '后台页面意外关闭，识别已停止' });
+      // 坑（盲审 S2，major）：这条路径以前**手写收尾**，漏了 cleanupAll 的那些步骤 ——
+      // 悬浮字幕窗收不到任何终态/提示也没被关（停在"运行中"外观：最后一句字幕 + 可点的停止
+      // 按钮，用户以为还在识别），mic 会话更糟：没人发 MIC_CAPTURE_STOP，浮窗继续采集、
+      // 系统录音指示灯常亮（MIC_CHUNK 因 offscreenPort 为空被丢弃）。
+      // 直接复用 cleanupAll：它已经把这些都做对了（含保留浮窗时的 MIC_CAPTURE_STOP 与终态补发）。
+      logLine('error', 'app', '后台页面意外关闭，识别已停止');
+      cleanupAll();
+      return;
     }, 3000);
   });
 
@@ -591,6 +588,9 @@ async function handleRequestStream(tabId: number | null) {
     offscreenPort?.postMessage({ type: 'STREAM_READY', streamId, source: 'tab' });
   } catch (e: any) {
     console.log('[TM BG] 获取音频流失败:', e?.message || e);
+    // 盲审 S1（major）：这三条宿主级 ERROR 以前只 sendToPopup —— 而点开始后 popup 必然已关闭，
+    // 于是"所有日志"里恰好没有原因。补齐进日志缓冲。
+    logLine('error', 'app', `获取音频流失败: ${e?.message || e}`);
     sendToPopup({ type: 'ERROR', message: `获取音频流失败: ${e?.message || e}` });
     cleanupAll();
   }
@@ -895,6 +895,7 @@ async function startRecognition(msg: any, respond: () => void) {
     // （epoch 已前进），这里的 cleanupAll() 会把**新会话**整个拆掉，再弹一条与用户
     // 操作无关的"启动失败"——旧实现正是 P1-5 双创建异常的放大器。
     if (stale()) { respond(); return; }
+    logLine('error', 'app', `启动失败: ${e}`);   // 盲审 S1：popup 已关时这条错误只有日志能留住
     sendToPopup({ type: 'ERROR', message: `启动失败: ${e}` });
     cleanupAll();
     respond();
