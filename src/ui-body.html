@@ -226,8 +226,47 @@
         <button type="button" id="helpBtnTranslateTiming" class="help-btn" aria-label="查看帮助" aria-describedby="helpTipTranslateTiming">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         </button>
-        <span class="help-tip flip anchor-right" role="tooltip" id="helpTipTranslateTiming">实时跟句：识别过程中反复重译中间结果，出译文快但更耗 CPU（每 0.5 秒最多一次）；仅定稿：每句说完才翻译一次，最省资源、译文不闪变。设置从下一次启动会话生效。</span>
+        <span class="help-tip flip anchor-right" role="tooltip" id="helpTipTranslateTiming">实时跟句：识别过程中反复重译中间结果，上一句译文回来后立刻发下一句（一次只有一条在途，不并发、不额外限速）；仅定稿：每句说完才翻译一次，最省资源、译文不闪变。设置从下一次启动会话生效。</span>
       </span>
+    </div>
+    <!-- —— 翻译来源：内置离线模型 / 用户自己的 OpenAI 兼容 API（/v1）——
+         两条来源共用同一条调度链路（队列、跟句重译、定稿、seq 对账），只是"谁来翻"不同。 -->
+    <div class="seg-row" id="translateSourceRow" role="radiogroup" aria-labelledby="secTranslate" style="margin-top:6px;">
+      <button type="button" class="seg active" data-source="builtin" role="radio" aria-checked="true"><span class="seg-name" data-key="translateSourceBuiltin">内置模型（离线）</span></button>
+      <button type="button" class="seg" data-source="api" role="radio" aria-checked="false"><span class="seg-name" data-key="translateSourceApi">OpenAI 兼容 API（/v1）</span></button>
+      <span class="help-wrap" style="margin-left:auto;">
+        <button type="button" id="helpBtnTranslateApi" class="help-btn" aria-label="查看帮助" aria-describedby="helpTipTranslateApi">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </button>
+        <span class="help-tip flip anchor-right" role="tooltip" id="helpTipTranslateApi"></span>
+      </span>
+    </div>
+    <div id="tapiBlock" hidden>
+      <div class="row tapi-row">
+        <label for="inpApiBase" id="lbApiBase"></label>
+        <input type="text" id="inpApiBase" class="tapi-input" spellcheck="false" placeholder="http://127.0.0.1:11434/v1">
+      </div>
+      <div class="row tapi-row">
+        <label for="inpApiModel" id="lbApiModel"></label>
+        <input type="text" id="inpApiModel" class="tapi-input" spellcheck="false" placeholder="qwen2.5:7b">
+      </div>
+      <div class="row tapi-row">
+        <label for="inpApiKey" id="lbApiKey"></label>
+        <input type="password" id="inpApiKey" class="tapi-input" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="row tapi-row">
+        <label for="inpApiReasoning" id="lbApiReasoning"></label>
+        <input type="text" id="inpApiReasoning" class="tapi-input" spellcheck="false" placeholder="none / low / medium / high">
+      </div>
+      <div class="row tapi-row tapi-col">
+        <label for="inpApiHeaders" id="lbApiHeaders"></label>
+        <textarea id="inpApiHeaders" class="tapi-area" rows="2" spellcheck="false" placeholder="api-key: abc&#10;x-org: team"></textarea>
+      </div>
+      <div class="row tapi-row tapi-col">
+        <label for="inpApiBody" id="lbApiBody"></label>
+        <textarea id="inpApiBody" class="tapi-area" rows="2" spellcheck="false" placeholder="temperature: 0.3&#10;top_p: 0.9"></textarea>
+      </div>
+      <p class="tapi-note" id="tapiNote"></p>
     </div>
     <div class="translate-notice" id="translateNotice" style="display:none;"></div>
     <div class="row" style="margin-top:6px;">

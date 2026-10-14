@@ -21,6 +21,8 @@ import { AsrEngine } from '../asr-engine';
 import { MicCapture, micErrorText } from '../mic-capture';
 import { appendHelperErrorHint, HelperSource, isHelperSilentCode, loadHelperSession } from '../helper';
 import { createLogBuffer } from '../logbus';
+import { apiSettingsFromPrefs } from '../translate-api';
+import type { TranslateApiSettings } from '../translate-api';
 import { emitToPanel, onHostMessage, resolveUrl, storage } from '../platform';
 import { tSync } from '../i18n';
 import { appendTranscript, attachTranscriptTranslation } from '../transcript-store';
@@ -379,6 +381,11 @@ async function startSession(msg: any) {
         translationEnabled: cfg.translationEnabled,
         translationDirection: cfg.translationDirection,
         translationTiming: cfg.translationTiming,
+        // 翻译来源 + OpenAI 兼容 API 配置。**坑（用户实测两次踩到）**：这里和 offscreen.ts
+        // 都是"手挑字段"拼 init 配置的，cfg 构造器里加了字段**不等于**传进了引擎 ——
+        // 漏了这一行，用户选了 API 也永远按内置模型跑（日志表现为 no-model）。
+        // 以后往 cfg 里加字段，务必同步这两个 init 调用点。
+        translationApi: cfg.translationApi,
         // 面板预取的屏幕共享流（system 音源）：引擎拿到就直接接入管道，
         // 不再自己调 getDisplayMedia（那时已不在用户手势内，必失败）
         preStream,
@@ -412,6 +419,8 @@ async function readSessionConfig(): Promise<{
   hotwords: string[] | null;
   translationEnabled: boolean; translationDirection: 'auto' | 'zh-en' | 'en-zh';
   translationTiming: 'stream' | 'final';
+  /** 翻译来源 + OpenAI 兼容 API 配置（与扩展 background 同构） */
+  translationApi: TranslateApiSettings;
 }> {
   const [langR, punctR, prefsR, hotwordsR] = await Promise.all([
     storage.get('tmspeech_lang'),
@@ -432,6 +441,8 @@ async function readSessionConfig(): Promise<{
     translationEnabled: prefs.translationEnabled === true,
     translationDirection: tdir === 'zh-en' || tdir === 'en-zh' ? tdir : 'auto',
     translationTiming: prefs.translationTiming === 'final' ? 'final' : 'stream',
+    // 翻译来源 + OpenAI 兼容 API 配置（与扩展 background 用同一份解析）
+    translationApi: apiSettingsFromPrefs(prefs),
   };
 }
 
@@ -507,8 +518,15 @@ export function installWebHost() {
         return true;
 
       case 'TRANSLATE_TEST':
-        // 面板的"测试翻译"：直接问引擎（Web 版没有跨上下文转发层）
-        return getEngine().testTranslate(String(msg.text ?? ''), msg.direction || 'auto');
+        // 面板的"测试翻译"：直接问引擎（Web 版没有跨上下文转发层）。
+        // 注意：没跑会话时引擎还没 init 过 → 必须在这里按**当前偏好**单独下发翻译来源，
+        // 否则选 API 也永远按内置模型测（用户实测报 no-model）。
+        return (async () => {
+          const eng = getEngine();
+          const r = await storage.get('tmspeech_prefs');
+          eng.setTranslateApiSettings(apiSettingsFromPrefs((r['tmspeech_prefs'] as any) || {}));
+          return eng.testTranslate(String(msg.text ?? ''), msg.direction || 'auto');
+        })();
 
       case 'TRANSLATE_TEST_CANCEL':
         engine?.cancelTranslateTest();
@@ -526,6 +544,7 @@ export function installWebHost() {
           msg.enabled === true,
           msg.direction === 'zh-en' || msg.direction === 'en-zh' ? msg.direction : 'auto',
           msg.timing === 'final' ? 'final' : 'stream',
+          msg.api,                       // 翻译来源 + OpenAI 兼容 API 配置
         );
         return true;
 

@@ -10,6 +10,8 @@
 //
 // 纪律：新增功能优先加在本文件 + ui-body.html 里，两端自动共享；
 // 只有真的需要 chrome.* 才按 IS_EXTENSION 分支，并且分支必须在 platform.ts 有对应封装。
+import { apiSettingsFromPrefs } from './translate-api';
+import type { TranslateApiSettings } from './translate-api';
 import { dedupeLogs, formatEntry, nextLogId, normalizeMessage } from './logbus';
 import { getLang, setLang, tSync } from './i18n';
 import {
@@ -448,6 +450,11 @@ const translateNotice = $('translateNotice');
 const translateStatus = $('translateStatus');
 const translateDirRow = $('translateDirRow');
 const translateTimingRow = $('translateTimingRow');
+//: 当前翻译来源。**必须声明在这里（元素声明区）**：预加载偏好那段在文件中部就会调用
+//: applyTranslateSource()，声明放晚了会踩 TDZ —— 用户实测表现是
+//: `can't access lexical declaration before initialization` + 面板所有按钮点不动。
+//: 它是**状态变量**、不从 DOM class 反推：见 applyBgMode 注释里那个"全局 .seg 选择器"真 bug。
+let translateSource: 'builtin' | 'api' = 'builtin';
 const TRANSLATE_RELEASES_URL = 'https://github.com/easysub-org/easysub/releases';
 // —— ASR 模型缺失引导（nomodel 版安装包）——
 const ASR_DATA_PATH = 'wasm/sherpa-onnx-wasm-main-asr.data';
@@ -478,6 +485,7 @@ requestAnimationFrame(() => {
 async function applyLang() {
   currentLang = await getLang();
   applyLogsLang();
+  applyTranslateApiLang();
   const tr = (key: string) => tSync(currentLang, key);
   $('appTitle').textContent = tr('appTitle');
   $('btnStartText').textContent = tr('btnStart');
@@ -690,6 +698,15 @@ async function loadPrefs() {
   applyTranslateDir(TRANSLATE_DIRS.includes(tdir) ? tdir : 'auto');
   // 翻译时机：白名单校验，非法值回退 stream（实时跟句，与旧行为一致）
   applyTranslateTiming(prefs.translationTiming === 'final' ? 'final' : 'stream');
+  // 翻译来源 + OpenAI 兼容 API 设置（全部持久化；缺省 = 内置离线模型、地址留空用默认值）
+  applyTranslateSource(prefs.translateSource === 'api' ? 'api' : 'builtin');
+  ($opt('inpApiBase') as HTMLInputElement | null)!.value = String(prefs.translateApiBase ?? '');
+  ($opt('inpApiModel') as HTMLInputElement | null)!.value = String(prefs.translateApiModel ?? '');
+  ($opt('inpApiKey') as HTMLInputElement | null)!.value = String(prefs.translateApiKey ?? '');
+  ($opt('inpApiReasoning') as HTMLInputElement | null)!.value = String(prefs.translateApiReasoning ?? '');
+  ($opt('inpApiHeaders') as HTMLTextAreaElement | null)!.value = String(prefs.translateApiHeaders ?? '');
+  ($opt('inpApiBody') as HTMLTextAreaElement | null)!.value = String(prefs.translateApiBody ?? '');
+  syncApiOriginRule();
   updateTranslateUi();
   // 历史字幕显示译文：默认开（!== false）
   chkTranscriptTr.checked = prefs.transcriptTrEnabled !== false;
@@ -885,14 +902,21 @@ document.querySelectorAll<HTMLButtonElement>('.cmode').forEach(b => {
 });
 
 function applyBgMode(mode: string) {
-  document.querySelectorAll<HTMLButtonElement>('.seg').forEach(b => {
+  // 坑（用户实测的真 bug）：这里以前用**全局 `.seg`** 选择器。于是：
+  //   ① 它给每一个 `.seg` 按钮（含翻译的方向/时机/来源三排）都挂了 onclick；
+  //   ② 点任意一个 → applyBgMode(undefined) → `undefined === undefined` 为真 →
+  //      **把所有没有 data-bgmode 的按钮全设成 active**（截图里七颗按钮全蓝）；
+  //   ③ 而"当前翻译来源"是读 `.active` 判断的 → 永远命中第一个（内置模型）→
+  //      用户选了 OpenAI 也永远走内置模型，测试翻译必然失败。
+  // 修法：只认自己那一排（[data-bgmode]）。新增分段控件时**不要再**用全局 `.seg` 选择器。
+  document.querySelectorAll<HTMLButtonElement>('[data-bgmode]').forEach(b => {
     const on = b.dataset.bgmode === mode;
     b.classList.toggle('active', on);
     b.setAttribute('aria-checked', String(on));
   });
 }
 
-document.querySelectorAll<HTMLButtonElement>('.seg').forEach(b => {
+document.querySelectorAll<HTMLButtonElement>('[data-bgmode]').forEach(b => {
   b.onclick = () => {
     const m = b.dataset.bgmode!;
     applyBgMode(m);
@@ -1245,13 +1269,59 @@ function pushLocalLog(level: string, source: string, message: string,
     message: normalizeMessage(message),
   };
   // 按 id 幂等：宿主可能把同一条回播两次（或我们自己先记了、宿主再广播），
-  // 同一个 id 就地替换而不是又 push 一条 —— 日志窗里"同一条出现两遍"是最招人烦的。
+  // 同一个 id 就地替换而不是又 push 一条。
   const seen = panelLogs.findIndex((e) => e.id === entry.id);
-  if (seen >= 0) panelLogs[seen] = entry;
-  else panelLogs.push(entry);
+  const isNew = seen < 0;
+  if (isNew) panelLogs.push(entry);
+  else panelLogs[seen] = entry;
   if (panelLogs.length > 500) panelLogs = panelLogs.slice(-500);
-  if (logsOpen) renderLogs();
+  // 打开时**增量追加**，但**只在真的是新条目时**：命中已存在的 id（我们自己记过、宿主又回播）
+  // 时数组去重了、DOM 却会多出一行 —— 盲审 P1-1：计数 N 条、屏幕 2N 行，直接打脸这个 feature。
+  if (logsOpen && isNew) queueLogAppend(entry);
   return entry;
+}
+
+//: 待追加的日志行 + 每帧只刷一次（日志密集时（跟句翻译）避免每条都触发一次重排）。
+let logPending: PanelLog[] = [];
+let logRaf = 0;
+
+function queueLogAppend(entry: PanelLog) {
+  logPending.push(entry);
+  if (logRaf) return;
+  const flush = () => {
+    logRaf = 0;
+    const batch = logPending;
+    logPending = [];
+    appendLogRows(batch);
+  };
+  logRaf = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame(flush)
+    : (setTimeout(flush, 16) as unknown as number);
+}
+
+/** 增量追加若干行（比整表重建便宜得多）。返回是否真的插入了。 */
+function appendLogRows(entries: PanelLog[]): void {
+  const list = $opt('logList');
+  if (!list || !entries.length) return;
+  const onlyErrors = ($opt('logOnlyErrors') as HTMLInputElement | null)?.checked === true;
+  const atBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 24;
+  const pending = entries.filter((e) => !onlyErrors || e.level === 'warn' || e.level === 'error');
+  // 盲审 P2-1：**没有真的要加行时不要摘占位** —— 勾着"只看错误/警告"且无匹配时，
+  // 一条 info 日志到达会把"没有符合条件的日志"抹掉，留下空白框 + "共 0 条"。
+  if (!pending.length) return;
+  const emptyEl = list.querySelector('.log-empty');
+  if (emptyEl) emptyEl.remove();
+  for (const entry of pending) {
+    const line = document.createElement('span');
+    line.className = 'log-line ' + (entry.level === 'error' ? 'error' : entry.level === 'warn' ? 'warn' : '');
+    line.textContent = formatEntry(entry as any);
+    list.appendChild(line);
+  }
+  // DOM 也要有上限：内存留 500 条，但屏幕上的节点同样不能无限长
+  while (list.childElementCount > 520) list.removeChild(list.firstElementChild!);
+  if (atBottom) list.scrollTop = list.scrollHeight;
+  const count = $opt('logCount');
+  if (count) count.textContent = tSync(currentLang, 'logsCount').replace('{n}', String(visibleLogs().length));
 }
 /**
  * 合并宿主那份与面板本地那份：**按稳定 id 去重**（原来用"时间+来源+内容"，而时间戳每一跳
@@ -1338,6 +1408,14 @@ function closeLogs(): void {
 
 function clearLogs(): void {
   panelLogs = [];
+  // 盲审 P1-3：清空必须**原子** —— 当帧已入队、还没被 rAF 刷出去的行也要丢掉，
+  // 否则点完"清空"旧行又会冒出来（计数 0 与可见行数矛盾）。
+  logPending = [];
+  if (logRaf) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(logRaf);
+    else clearTimeout(logRaf);
+    logRaf = 0;
+  }
   // 作废在途的 GET_LOGS 响应：否则"打开后立刻清空"时，已经发出、稍后才 resolve 的那份
   // 会把它 mergeLogs 回来（看起来清空没生效、老日志又活了）。独立审查 B9。
   logsClearedAt = Date.now();
@@ -1759,6 +1837,7 @@ async function doStart(): Promise<void> {
 }
 
 wireLogs();   // 日志窗（默认关闭；点底部按钮展开）的接线
+wireTranslateApi();  // 翻译来源 + OpenAI 兼容 API 表单的接线
 
 export function triggerStart(): void { void doStart(); }
 btnStart.onclick = () => { void doStart(); };
@@ -2308,7 +2387,7 @@ document.querySelectorAll<HTMLButtonElement>('#translateDirRow .seg').forEach(b 
   };
 });
 
-// —— 翻译时机：stream=实时跟句（中间态重译，冷却 0.5s）｜final=仅定稿（句完才翻） ——
+// —— 翻译时机：stream=实时跟句（中间态重译；**上一句回来才发下一句**，不做固定节流）｜final=仅定稿（句完才翻） ——
 function applyTranslateTiming(timing: string) {
   document.querySelectorAll<HTMLButtonElement>('#translateTimingRow .seg').forEach(b => {
     const on = b.dataset.timing === timing;
@@ -2329,6 +2408,104 @@ document.querySelectorAll<HTMLButtonElement>('#translateTimingRow .seg').forEach
 // 运行中改实时翻译设置：只有会话在跑时才需要通知宿主（空闲时改的就是"下次生效"，
 // 由 START 时的配置回源读取）。不通知的话运行中改开关/方向/时机是完全静默无效的
 // ——用户会以为功能坏了（实测反馈过"网页版翻译用不了"）。
+//: 当前翻译来源的声明在**文件顶部元素声明区**（必须早于预加载偏好那段的使用点，否则 TDZ）。
+//: 它是状态变量、不从 DOM class 反推 —— 见 applyBgMode 注释里那个"全局 .seg 选择器"真 bug。
+
+/** 当前选中的翻译来源。**读状态变量而不是 DOM class** —— 上面那个全局 `.seg` bug 正是
+ *  因为"按 class 判断"才让选 API 永远失效；状态量不会再被别的控件污染。 */
+function activeTranslateSource(): 'builtin' | 'api' {
+  return translateSource === 'api' ? 'api' : 'builtin';
+}
+
+/** 切来源：写状态 + 显示/隐藏 API 表单，并同步内置模型相关的入口（选 API 时它们没有意义）。 */
+function applyTranslateSource(src: 'builtin' | 'api') {
+  translateSource = src === 'api' ? 'api' : 'builtin';
+  for (const btn of Array.from(document.querySelectorAll('#translateSourceRow .seg'))) {
+    const el = btn as HTMLElement;
+    const on = el.dataset.source === translateSource;
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-checked', on ? 'true' : 'false');
+  }
+  // 注意：**不要在这里动 tapiBlock 的显隐** —— 它的唯一主人是 `updateTranslateUi()`。
+  // 这里以前写 `block.hidden = src !== 'api'`，而本函数会在每次打开面板/切语言时被调用
+  // （经 applyTranslateApiLang）→ 用户"关掉翻译后表单隐藏、重开面板又冒出来"（用户实测）。
+  const pick = $opt('btnPickModel');
+  if (pick) (pick as HTMLElement).hidden = src === 'api';
+}
+
+/** 从**表单当前值**组装 API 配置（改完立刻生效，不必等会话重启）。 */
+function translateApiFromUi(): TranslateApiSettings {
+  return apiSettingsFromPrefs({
+    translateSource: activeTranslateSource(),
+    translateApiBase: ($opt('inpApiBase') as HTMLInputElement | null)?.value,
+    translateApiModel: ($opt('inpApiModel') as HTMLInputElement | null)?.value,
+    translateApiKey: ($opt('inpApiKey') as HTMLInputElement | null)?.value,
+    translateApiReasoning: ($opt('inpApiReasoning') as HTMLInputElement | null)?.value,
+    translateApiHeaders: ($opt('inpApiHeaders') as HTMLTextAreaElement | null)?.value,
+    translateApiBody: ($opt('inpApiBody') as HTMLTextAreaElement | null)?.value,
+  });
+}
+
+/** 让 background 给"当前生效的地址"同步 Origin 规则（扩展版访问本地模型服务必需）。 */
+function syncApiOriginRule(): void {
+  // 必须用**归一化后的** address：地址留空时它等于默认值（11434）。
+  // 坑（用户实测"能用一小会又 403"）：先前直接送输入框原值，空串会被 background 当作
+  // "没有地址"从而**撤掉规则**；而 SW 冷启动/测试路径送的是归一化值、又把规则装回来 ——
+  // 规则一装一撤，表现为"正常一小会突然就不行"。填了地址就稳定（用户就是这样验证的）。
+  const base = translateApiFromUi().base;
+  void sendToHost({ type: 'SYNC_API_ORIGIN', base }).catch(() => {});
+}
+
+/** 持久化 API 表单 + 让运行中的会话当场生效（含"改了来源/模型名不用重启"）。 */
+function saveTranslateApiSettings() {
+  const api = translateApiFromUi();
+  savePrefs({
+    translateSource: api.source,
+    translateApiBase: ($opt('inpApiBase') as HTMLInputElement | null)?.value ?? '',
+    translateApiModel: api.model,
+    translateApiKey: api.key,
+    translateApiReasoning: api.reasoning,
+    translateApiHeaders: api.headersText,
+    translateApiBody: api.bodyText,
+  });
+  syncApiOriginRule();
+  updateTranslateUi();
+  pushTranslateLive();
+}
+
+/** 语言切换时刷新这一块（与其它翻译控件同一时机）。 */
+function applyTranslateApiLang(): void {
+  const tr = (k: string) => tSync(currentLang, k);  for (const [id, key] of [['lbApiBase', 'lbApiBase'], ['lbApiModel', 'lbApiModel'],
+                           ['lbApiKey', 'lbApiKey'], ['lbApiReasoning', 'lbApiReasoning'],
+                           ['lbApiHeaders', 'lbApiHeaders'], ['lbApiBody', 'lbApiBody']] as const) {
+    const el = $opt(id);
+    if (el) el.textContent = tr(key);
+  }
+  const note = $opt('tapiNote');
+  if (note) note.textContent = tr('tapiNote');
+  const tip = $opt('helpTipTranslateApi');
+  if (tip) tip.textContent = tr('helpTipTranslateApi');
+  // 用户实测：首屏三排分段控件的选中态有时不对（点一下才恢复）。这里按**当前值**统一重画一遍，
+  // 幂等、且与 i18n 在同一时机执行，不依赖"谁先跑"。
+  applyTranslateDir(activeTranslateDir());
+  applyTranslateTiming(activeTranslateTiming());
+  applyTranslateSource(activeTranslateSource());
+}
+
+function wireTranslateApi(): void {
+  for (const btn of Array.from(document.querySelectorAll('#translateSourceRow .seg'))) {
+    btn.addEventListener('click', () => {
+      const src = (btn as HTMLElement).dataset.source === 'api' ? 'api' : 'builtin';
+      applyTranslateSource(src);
+      saveTranslateApiSettings();
+    });
+  }
+  for (const id of ['inpApiBase', 'inpApiModel', 'inpApiKey', 'inpApiReasoning', 'inpApiHeaders', 'inpApiBody']) {
+    $opt(id)?.addEventListener('change', saveTranslateApiSettings);
+  }
+  applyTranslateApiLang();
+}
+
 function pushTranslateLive() {
   if (lastStatus !== 'Running') return;
   sendToHost({
@@ -2336,11 +2513,23 @@ function pushTranslateLive() {
     enabled: chkTranslate.checked,
     direction: activeTranslateDir(),
     timing: activeTranslateTiming(),
+    // 翻译来源 + API 配置一起推给引擎：改了地址/模型名/推理控制立刻生效（不用重启会话）
+    api: translateApiFromUi(),
   }).catch(() => {});
 }
 
 function buildTranslateNotice() {
   translateNotice.textContent = '';
+  // API 模式没有"内置模型未导入"这回事：这里缺的是地址/模型名（两条来源的提示必须各说各的）
+  if (activeTranslateSource() === 'api') {
+    if (!translateApiFromUi().model) {
+      translateNotice.appendChild(document.createTextNode(tSync(currentLang, 'tapiNeedModel')));
+      translateNotice.style.display = '';
+    } else {
+      translateNotice.style.display = 'none';
+    }
+    return;
+  }
   translateNotice.appendChild(document.createTextNode(tSync(currentLang, 'translateNeedModel') + ' '));
   const link = document.createElement('a');
   link.href = TRANSLATE_RELEASES_URL;
@@ -2351,6 +2540,12 @@ function buildTranslateNotice() {
 }
 
 async function refreshTranslateStatus() {
+  // 盲审 minor：API 来源下"未选择翻译模型"是**内置模型**的常态，显示出来与用户所选矛盾。
+  if (activeTranslateSource() === 'api') {
+    translateStatus.textContent = tSync(currentLang, 'tapiStatus')
+      .replace('{m}', translateApiFromUi().model || '—');
+    return;
+  }
   try {
     const keys = await listModelKeys();
     translateStatus.textContent = keys.length > 0
@@ -2365,6 +2560,11 @@ function updateTranslateUi() {
   translateDirRow.style.display = chkTranslate.checked ? '' : 'none';
   translateTimingRow.style.display = chkTranslate.checked ? '' : 'none';
   translateNotice.style.display = chkTranslate.checked ? '' : 'none';
+  // 「翻译来源」这一排与 API 表单同样只在启用翻译时出现（关着还摆一整套 API 表单很怪）
+  const srcRow = $opt('translateSourceRow');
+  if (srcRow) (srcRow as HTMLElement).style.display = chkTranslate.checked ? '' : 'none';
+  const apiBlock = $opt('tapiBlock');
+  if (apiBlock) apiBlock.hidden = !chkTranslate.checked || activeTranslateSource() !== 'api';
   if (chkTranslate.checked) buildTranslateNotice();
 }
 
@@ -2406,7 +2606,12 @@ btnTestTranslate.onclick = async () => {
   translateStatus.textContent = tSync(currentLang, 'translateTesting');
   let r: any = null;
   try {
-    r = await sendToHost({ type: 'TRANSLATE_TEST', text: sample, direction: dir });
+    r = await sendToHost({
+      type: 'TRANSLATE_TEST', text: sample, direction: dir,
+      // 盲审 minor：测试必须用**表单当前值**。以前只让宿主去读已保存偏好，而 savePrefs 是异步
+      // promise 链 —— 改完地址立刻点测试很可能测到旧配置，还会把会话的实时配置覆盖回旧的。
+      api: translateApiFromUi(),
+    });
   } catch { r = null; }
   translateTesting = false;
   if (translateTestCancelled) return;
@@ -2551,7 +2756,8 @@ onMessageFromHost((msg) => {
       // 宿主广播的新日志（它自己/引擎/助手那几条）。**必须沿用它的 id/t**：
       // 上一轮我以为"跳过 source==='panel'"就够了，但 helper/engine 这类来源仍会在面板本地被
       // 重新盖一个新 id → 按 id 去重永远配不上 → 日志窗照旧一行两遍（复核 P0-1，必现）。
-      if (msg.entry) {
+      // 另外（盲审 P1-3）：清空之后到达的旧回播要丢掉（按时间戳判），否则"清空"不原子。
+      if (msg.entry && (Number(msg.entry.t) || 0) >= logsClearedAt) {
         pushLocalLog(msg.entry.level || 'info', msg.entry.source || 'app', msg.entry.message || '',
                      { t: msg.entry.t, id: msg.entry.id });
       }

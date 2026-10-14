@@ -18,6 +18,13 @@ import { addPunctuation } from './punctuator';
 import { resample } from './audio-processor';
 import { getModelFile } from './model-db';
 import { probeBundledResource } from './platform';
+import type { TranslateApiSettings } from './translate-api';
+
+//: 在途翻译的兜底上限（毫秒）：超过就放行队列 —— 见 armTranslateWatchdog。
+//: 取 25 秒：比 worker 自己的 15 秒请求超时更宽，正常慢模型不会误伤，但"永远 pending"一定会被兜住。
+const TRANSLATE_WATCHDOG_MS = 25000;
+//: 「实时跟句」**不做固定节流**（用户明确要求）：天然节流来自"一次只有一条在途" ——
+//: 上一句译文回来才发下一句。快模型自然快、慢模型自然慢，不堆积也不并发压垮服务。
 
 // ---- wasm 脚本动态注入（nomodel 支持）----
 // 宿主页面只静态加载 preload.js（仅定义 Module 不拉资源）。三个 wasm 脚本必须等
@@ -73,6 +80,8 @@ export interface InitOptions {
   translationEnabled?: boolean;
   translationDirection?: 'auto' | 'zh-en' | 'en-zh';
   translationTiming?: 'stream' | 'final';
+  /** 翻译来源与 OpenAI 兼容 API 配置（'builtin' 时忽略其余字段）。 */
+  translationApi?: TranslateApiSettings;
   // 宿主预取的屏幕共享音频流（纯 Web 版专用）。getDisplayMedia 需要瞬时用户激活，
   // 而 Web 版的启动链路里隔着模型检查等异步步骤，等走到引擎这步手势已失效，
   // 所以由面板在点击任务内先取流，engine 直接消费。扩展侧不传（offscreen 文档
@@ -130,6 +139,29 @@ export class AsrEngine {
   private translateDirection: 'auto' | 'zh-en' | 'en-zh' = 'auto';
   // 翻译时机：stream=实时跟句（中间态重译）｜final=仅定稿（句完才翻，最省 CPU）
   private translationTiming: 'stream' | 'final' = 'stream';
+  /** 翻译来源与 API 配置（worker 内部据此分流；调度完全不知道它的存在）。 */
+  private translateApiCfg: TranslateApiSettings | null = null;
+  /** 翻译在途看门狗（见 armTranslateWatchdog 的说明）。 */
+  private translateWatchdog: any = null;
+  /** 上次翻译**出错**的时间：失败只告警、不关门（30 秒节流），见 onTranslationResult。 */
+  private lastTranslateErrorAt = 0;
+  /** 上次提交「跟句」任务的时间（仅诊断用）。 */
+  private lastStreamSubmitAt = 0;
+  /** 退避/补泵共用的定时器。 */
+  private streamThrottleTimer: any = null;
+  /**
+   * 翻译**失败重试**的退避（用户要求）：第一次等 500ms 再试，之后每次翻倍，上限 30 秒；
+   * 成功一次就回到 500ms。退避期间只**保住队列**、不占在途槽 —— 所以看门狗不会误杀，
+   * 也不会因为一个连不上的地址把整条链路卡死（上一条修复：失败不再永久关停翻译）。
+   */
+  private translateBackoffMs = 500;
+  private translateNextAttemptAt = 0;
+  /**
+   * **已交付过定稿**的句号集合（盲审 S2）。不能用 `bestBySeq` 判断"这句翻完了" ——
+   * 流式半截也会写进 `bestBySeq`，于是看门狗放弃 final 之后，backlog 兜底会被静默抑制，
+   * 该句**永远没有定稿译文**（显示与落库都缺）。这里按"定稿是否真的交付过"来判。
+   */
+  private finalDoneBySeq = new Set<number>();
   private translateWarned = false;
 
   // 当前识别句的序号（从 1 起）。随 SENTENCE_DONE 递增，随每次 TRANSLATE 消息带给 worker，
@@ -247,7 +279,11 @@ export class AsrEngine {
     this.translateDirection = msg.translationDirection === 'zh-en' || msg.translationDirection === 'en-zh'
       ? msg.translationDirection : 'auto';
     this.translationTiming = msg.translationTiming === 'final' ? 'final' : 'stream';
+    // 翻译来源（内置离线模型 / 用户自己的 OpenAI 兼容 API）随会话配置下发；改动它不影响
+    // 任何调度逻辑：worker 内部按 source 分流，TRANSLATE/TRANSLATION 协议完全一致。
+    this.translateApiCfg = msg.translationApi ?? null;
     if (this.translateEnabled) this.ensureTranslateWorker();
+    this.sendTranslateConfig();
     this.resetTranslationState();
 
     // 坑：跨会话残留的文本状态会让新会话开头闪出上一场的字幕；这里全部清零，
@@ -487,8 +523,11 @@ export class AsrEngine {
     // 坑（丢译文修复）：上一句（seq-1）若已有流式译文但定稿任务还没轮到跑，
     // 旧实现会因"中间态过期"把它整个丢掉，且不再补翻——该句译文永久丢失。
     // 现在把它的"最终文本"以最低优先级（backlog）排队补翻。
-    if (seq - 1 >= 1 && !this.bestBySeq.has(seq - 1)) {
+    if (seq - 1 >= 1 && !this.finalDoneBySeq.has(seq - 1)) {
+      // 判据是**定稿是否交付过**（不是 bestBySeq：流式半截也在里面，会把兜底抑制掉 —— 盲审 S2）
       const prevFinal = this.lastFinalTexts.get(seq - 1);
+      // 恢复原样（用户要求"调度完全一致"）：这里就是**先补 backlog**，与加此功能之前逐字相同。
+      // （盲审提过"backlog 可能抢占当前句 final"，但那属于原有设计的取舍，不由我改。）
       if (prevFinal) this.translateBacklog(seq - 1, prevFinal);
     }
     this.lastFinalTexts.set(seq, this.prevSentence);
@@ -550,9 +589,13 @@ export class AsrEngine {
       // 整体丢弃（表现为一条译文都出不来）。worker 原样回传 seq/gen：串行单在途下，
       // 同 seq 的回包只可能来自当前请求；gen 挡住跨会话的撞号回包。
       if (e.target !== this.translateWorker) return;
-      if (this.inFlight && m.seq === this.inFlight.seq && m.gen === this.transGen) {
+      if (this.inFlight && m.seq === this.inFlight.seq && m.gen === this.transGen
+          // 盲审 major：只看 seq+gen 时，看门狗放行后新提交的 final 会被**旧的 stream 回包**
+          // 撞上（同句同代次）→ 半截流式译文被当定稿交付并永久落库。kind 也要对上。
+          && (m.kind ?? 'final') === this.inFlight.kind) {
         const done = this.inFlight;
         this.inFlight = null;
+        this.clearTranslateWatchdog();
         this.onTranslationResult(done, m);
       } else if (this.inFlight) {
         this.log(`[译] 回包对不上号：在途 seq=${this.inFlight.seq}/${this.inFlight.kind}，回包 seq=${m.seq}/${m.kind}，丢弃`);
@@ -568,6 +611,9 @@ export class AsrEngine {
   private onTranslationResult(job: { kind: 'final' | 'stream'; seq: number; text: string }, m: any) {
     const prev = this.bestBySeq.get(job.seq);
     if (m.ok && m.text) {
+      // 成功一次就把退避复位（用户要求：成功回到 500ms）
+      this.translateBackoffMs = 500;
+      this.translateNextAttemptAt = 0;
       if (job.kind !== 'stream' || prev == null) this.bestBySeq.set(job.seq, m.text);
       const text = m.text;
       if (job.kind === 'stream') {
@@ -575,15 +621,37 @@ export class AsrEngine {
       } else {
         this.sink.toDisplay({ type: 'TRANSLATION_FINAL', text, seq: job.seq });
         this.sink.toPanel({ type: 'TRANSLATION_FINAL', text, seq: job.seq });
+        this.finalDoneBySeq.add(job.seq);   // 只有这里标记"定稿已交付"（见字段说明）
       }
       this.log(`[译] 交付 seq=${job.seq}/${job.kind} → "${String(text).slice(0, 30)}"`);
     } else if (m.reason === 'no-model' && !this.translateWarned) {
       this.translateWarned = true;
       // 保留发布页地址：用户没有其它自助恢复途径，日志是唯一告知渠道（扩展侧原文如此）
       this.log('翻译不可用：未检测到翻译模型。请在面板"实时翻译"中点击"选择模型"安装官方模型包（github.com/easysub-org/easysub/releases）');
-    } else if (m.error && !this.translateWarned) {
-      this.translateWarned = true;
-      this.log('翻译出错: ' + m.error);
+    } else if (m.error) {
+      // 坑（盲审 blocker，也是用户"用一会就挂了"的元凶之一）：以前**任何一次**失败都把
+      // `translateWarned` 永久立起 → 一次 429/超时/CORS/格式错就把**整场会话**的翻译关停，
+      // 而唯一线索是一行默认折叠的日志（扩展版点开始后 popup 已关闭，用户看不到）。
+      // 现在只有"缺模型"（上面那支，真永久态）才关门；请求类失败**只告警、继续重试**，
+      // 并做 30 秒节流防刷屏。
+      const now = Date.now();
+      // 盲审 S1（major）：**失败的 job 必须重新入队**。以前这里只设退避窗口、把 job 丢掉，
+      // 于是"重试"只对**之后新产生**的任务生效 —— 该句最多靠下一句的 backlog 兜一次，
+      // 再失败就永久丢失译文（显示少一句、导出 SRT/TXT 少一行，且没有任何提示）。
+      this.requeueTranslateJob(job.kind, job.seq, job.text);
+      // 指数退避（用户要求）：500ms → 1s → 2s … 上限 30s；失败期间的新提交都会等到窗口打开。
+      this.translateNextAttemptAt = now + this.translateBackoffMs;
+      this.translateBackoffMs = Math.min(this.translateBackoffMs * 2, 30000);
+      if (!this.streamThrottleTimer) {
+        this.streamThrottleTimer = setTimeout(() => {
+          this.streamThrottleTimer = null;
+          this.pumpTranslate();
+        }, Math.max(0, this.translateNextAttemptAt - Date.now()));
+      }
+      if (now - this.lastTranslateErrorAt > 30000) {
+        this.lastTranslateErrorAt = now;
+        this.log(`翻译出错（${Math.round((this.translateNextAttemptAt - now) / 100) / 10} 秒后重试）: ` + m.error);
+      }
     }
     this.dropStaleBest();
   }
@@ -591,6 +659,17 @@ export class AsrEngine {
   // —— 队列泵：worker 空闲时按优先级取下一个任务 ——
   private pumpTranslate() {
     if (!this.translateWorker || !this.translateEnabled || this.inFlight) return;
+    // 失败退避窗口内：不提交，等到点了自动再泵一次（见 translateBackoffMs）
+    const wait = this.translateNextAttemptAt - Date.now();
+    if (wait > 0) {
+      if (!this.streamThrottleTimer) {
+        this.streamThrottleTimer = setTimeout(() => {
+          this.streamThrottleTimer = null;
+          this.pumpTranslate();
+        }, wait);
+      }
+      return;
+    }
     let job: TransJob | null = null;
     let idx = -1;
     let fromSlot = false;
@@ -598,7 +677,9 @@ export class AsrEngine {
     for (let i = 0; i < this.transQueue.length; i++) {
       if (this.transQueue[i].kind === 'final') { job = this.transQueue[i]; idx = i; break; }
     }
-    // 优先级 2：实时流式——无人工延迟：worker 空闲且槽里有最新中间态就立即提交。
+    // 优先级 2：实时流式——**一次只放一条在途**（pumpTranslate 开头就挡住并发），
+    // 所以"上一句译文回来之后才发下一句"就是天然节流：慢模型自然慢，不会堆积、也不会
+    // 并发压垮服务。刻意**不加时间窗**（用户明确要求：500ms 那种固定节流太伤体验）。
     if (!job && this.streamSlot && this.translationTiming === 'stream') {
       job = { kind: 'stream', seq: this.streamSlot.seq, text: this.streamSlot.text, at: Date.now() };
       fromSlot = true;
@@ -611,7 +692,7 @@ export class AsrEngine {
       for (let i = 0; i < this.transQueue.length; i++) {
         const j = this.transQueue[i];
         if (j.kind !== 'backlog') continue;
-        if (this.bestBySeq.has(j.seq)) { this.transQueue.splice(i, 1); i--; continue; }
+        if (this.finalDoneBySeq.has(j.seq)) { this.transQueue.splice(i, 1); i--; continue; }
         job = j; idx = i; break;
       }
     }
@@ -619,7 +700,11 @@ export class AsrEngine {
     if (fromSlot) this.streamSlot = null;
     else if (idx >= 0) this.transQueue.splice(idx, 1);
     this.inFlight = { kind: job.kind === 'backlog' ? 'final' : job.kind, seq: job.seq, text: job.text };
-    this.log(`[译] 提交 seq=${job.seq}/${job.kind} "${job.text.slice(0, 24)}" 队列余=${this.transQueue.length}${this.streamSlot ? ' 槽有货' : ''}`);
+    this.armTranslateWatchdog(job.seq);
+    if (this.inFlight.kind === 'stream') this.lastStreamSubmitAt = Date.now();
+    // 坑（盲审 minor）：这里以前每次提交都打一行（含原文前 24 字）→ 跟句模式下每秒数条，
+    // 500 条环形缓冲约 50 秒就被冲空，用户点开日志窗想查的"翻译出错"早被挤没了；原文进
+    // storage.session 还扩大了隐私面。交付那一条保留，提交不再打。
     this.translateWorker.postMessage({
       type: 'TRANSLATE',
       text: job.text,
@@ -629,6 +714,65 @@ export class AsrEngine {
       gen: this.transGen,
       wasmPaths: this.resolveUrl('ort-wasm/'),
     });
+  }
+
+  /**
+   * 把「翻译来源」配置推给 worker。
+   * 三处共用：会话配置落地、运行中改设置、点「测试翻译」。**调度完全不知道它的存在** ——
+   * worker 内部按 source 分流，TRANSLATE/TRANSLATION 协议与队列语义一行没改。
+   */
+  /**
+   * 单独下发「翻译来源」配置（不经 init）。
+   * 为什么需要它：**没跑会话时引擎从没 init() 过** —— 而「测试翻译」恰恰是"还没开始识别，
+   * 先试试模型能不能用"的场景。没有这条通道，测试永远按内置模型跑（用户实测报 no-model）。
+   */
+  setTranslateApiSettings(cfg: TranslateApiSettings) {
+    this.translateApiCfg = cfg;
+    this.sendTranslateConfig();
+  }
+
+  /**
+   * 翻译在途看门狗。**用户实测"用一会就挂了"**：worker 因任何原因不回包（网络请求永远
+   * pending、worker 静默、超时逻辑失效）时，`inFlight` 会永久挂住，整条翻译队列从此停摆，
+   * 而音频/识别还在跑 —— 用户只看到"翻译突然不动了、再也不恢复"。
+   * 这里给在途请求一个上限：到点就放行队列（并记一条，便于排查），下一次提交即可恢复。
+   * 注意：它只是**容错**，不改变调度语义（仍有且仅有一个在途）。
+   */
+  private armTranslateWatchdog(seq: number) {
+    this.clearTranslateWatchdog();
+    this.translateWatchdog = setTimeout(() => {
+      this.translateWatchdog = null;
+      if (!this.inFlight) return;
+      this.log(`[译] ${Math.round(TRANSLATE_WATCHDOG_MS / 1000)} 秒没有回包（seq=${seq}）：放行队列继续，翻译恢复`);
+      // 放弃在途请求时**递增代次**：那条迟到的回包（可能半截）从此一律对不上号，
+      // 不会被后续任务误当成自己的结果（盲审 major）。
+      this.transGen += 1;
+      // 盲审 S2（major）：被放弃的 job 也要**重新入队**，否则该句定稿永远补不回来
+      // （流式半截已进 bestBySeq，会让 backlog 兜底被抑制）。
+      const abandoned = this.inFlight;
+      this.inFlight = null;
+      if (abandoned) this.requeueTranslateJob(abandoned.kind, abandoned.seq, abandoned.text);
+      this.pumpTranslate();
+    }, TRANSLATE_WATCHDOG_MS);
+  }
+
+  private clearTranslateWatchdog() {
+    if (this.translateWatchdog) {
+      clearTimeout(this.translateWatchdog);
+      this.translateWatchdog = null;
+    }
+  }
+
+  private sendTranslateConfig() {
+    if (!this.translateWorker) return;
+    try {
+      this.translateWorker.postMessage({
+        type: 'TRANSLATION_CONFIG',
+        ...(this.translateApiCfg || { source: 'builtin' }),
+      });
+    } catch (e) {
+      this.log('翻译配置下发失败: ' + e);
+    }
   }
 
   private ensureTranslateWorker() {
@@ -657,6 +801,8 @@ export class AsrEngine {
         this.testOwnedWorker = false;
       }
       this.translateTestResolver = resolve;
+      // 把「翻译来源」配置推给 worker（测试按钮也要测**当前来源**：选 API 就测 API）
+      this.sendTranslateConfig();
       // 测试用 24 个 token 上限：短句足够验证模型可用，避免单线程生成跑满 128 token 久久不返回
       this.translateWorker!.postMessage({
         type: 'TRANSLATE', text, direction, kind: 'final',
@@ -685,14 +831,40 @@ export class AsrEngine {
   }
 
   // —— 翻译状态整体复位：会话停止 / 测试取消 / worker 重建时调用，防上一场任务串场 ——
+  /**
+   * 把失败/被放弃的翻译任务放回队列（盲审 S1/S2）。
+   * 守住"一次只有一条在途"：只是入队，泵仍受 inFlight 与退避窗口约束。
+   * 定稿任务只在**还没交付过定稿**时才重入队；流式任务只对当前句重投（旧句的中间态没意义）。
+   */
+  private requeueTranslateJob(kind: 'final' | 'stream', seq: number, text: string) {
+    if (!text) return;
+    if (kind === 'stream') {
+      if (seq === this.sentenceSeq) this.streamSlot = { text, seq };
+      return;
+    }
+    if (this.finalDoneBySeq.has(seq)) return;
+    if (this.transQueue.some(j => j.seq === seq && j.kind === 'final')) return;
+    this.transQueue.push({ kind: 'final', seq, text, at: Date.now() });
+  }
+
   private resetTranslationState() {
     this.inFlight = null;
     this.transQueue.length = 0;
     this.streamSlot = null;
     this.bestBySeq.clear();
+    this.finalDoneBySeq.clear();
     this.lastFinalTexts.clear();
     this.sentenceSeq = 1;
     this.transGen++;
+    // 盲审 S3（major，Web 版）：退避状态必须**跨会话复位**。Web 宿主的 engine 实例跨会话复用
+    // （web/host.ts 懒建后不销毁），上一场最后一次失败会把退避推进到最长 30 秒 ——
+    // 用户"改好配置、重启会话"，开头半分钟一个字都不翻，极易被判成随机故障。
+    this.translateBackoffMs = 500;
+    this.translateNextAttemptAt = 0;
+    if (this.streamThrottleTimer) {
+      clearTimeout(this.streamThrottleTimer);
+      this.streamThrottleTimer = null;
+    }
   }
 
   private destroyTranslateWorker() {
@@ -727,11 +899,16 @@ export class AsrEngine {
   // 当场生效（扩展侧同一份实现，两端行为一致）。
   // 注意方向/时机只影响后续请求：在途那条仍按发出时的方向返回，回包按 seq+gen 对账，
   // 不会错位；切到 final 只是不再入队中间态。
-  setTranslationLive(enabled: boolean, direction: 'auto' | 'zh-en' | 'en-zh', timing: 'stream' | 'final') {
+  setTranslationLive(enabled: boolean, direction: 'auto' | 'zh-en' | 'en-zh', timing: 'stream' | 'final',
+                     api?: TranslateApiSettings) {
     this.translateEnabled = enabled;
     this.translateDirection = direction;
     this.translationTiming = timing;
-    this.log(`实时翻译（本场生效）: ${enabled ? '开' : '关'} 方向=${direction} 时机=${timing}`);
+    // 运行中改「翻译来源」/API 配置也要当场生效（否则用户改了地址、模型名却仍用旧的，
+    // 只能重启会话——那正是"改了没反应"的经典体验）。
+    if (api) this.translateApiCfg = api;
+    this.log(`实时翻译（本场生效）: ${enabled ? '开' : '关'} 方向=${direction} 时机=${timing}`
+      + (api ? ` 来源=${api.source}${api.source === 'api' ? '(' + (api.model || '未填模型') + ')' : ''}` : ''));
     if (!enabled) {
       // 关掉就停掉在途与积压，不再占用 CPU；worker 留着下次秒开
       this.inFlight = null;
@@ -741,6 +918,7 @@ export class AsrEngine {
     }
     this.translateWarned = false;
     this.ensureTranslateWorker();
+    this.sendTranslateConfig();
     // 刚打开时把"当前这一句"补进去：否则要等到下一句才有译文，用户以为没生效
     if (this.prevSentence) this.translateBacklog(this.sentenceSeq - 1, this.prevSentence);
   }

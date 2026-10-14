@@ -2,6 +2,7 @@
 // Copyright (C) 2026 hcz1017
 import { t } from './i18n';
 import { createLogBuffer } from './logbus';
+import { apiSettingsFromPrefs, originPatternFor } from './translate-api';
 // 字幕记录的读写全部收敛在 transcript-store（与纯 Web 版共用同一份实现）；
 // 这里只需要追加与挂译文两个入口，其余导出留给未来可能用到的地方。
 import { appendTranscript, attachTranscriptTranslation } from './transcript-store';
@@ -60,6 +61,19 @@ let reconnectTimer: any = null;
 // 代次，不匹配立即中止（不再置状态/不发消息/不创建文档）。SW 重启后计数归零无妨：
 // 代次只在同一次 SW 生命周期内的 START 与清理之间做比对。
 let sessionEpoch = 0;
+/**
+ * **我们自己**正在关闭的 offscreen 端口（盲审 S3：用时间戳是错的，两个方向都错 ——
+ * ① START 的 !reuseDoc 分支没盖戳，原 bug 仍在；② 2 秒窗口会把"停止后马上重试"的真断开
+ * 一起吞掉 → 会话永远停在 Running、无字幕无错误）。改成**按端口身份**精确识别：
+ * 自带关闭标记的端口断开 = 我们造成的（不武装重连定时器）；其余断开一律正常武装。
+ */
+const selfClosingPorts = new WeakSet<any>();
+
+/** 关闭 offscreen 文档的**唯一入口**：先给当前端口盖"自关闭"戳，再关。 */
+function selfCloseOffscreen() {
+  if (offscreenPort) selfClosingPorts.add(offscreenPort);
+  try { chrome.offscreen.closeDocument().catch(() => {}); } catch {}
+}
 // 电平快照（最近 60 条，~7s）：波形只在 popup 打开时渲染，LEVEL 消息收不到时
 // 快照兜底，让"每次打开面板"都能恢复上一段波形而不是从空基线重新填充。
 const LEVEL_SNAPSHOT_MAX = 60;
@@ -106,6 +120,77 @@ async function restoreLogs() {
 }
 
 void restoreLogs();
+
+// SW 冷启动补装一次 Origin 规则：用户可能早就配好了地址、之后没再改过设置
+// （动态规则本身是持久化的，这里只是保证"升级/首次启用"后也一定装上）。
+void chrome.storage.local.get('tmspeech_prefs')
+  .then((r: any) => syncApiOriginRule(apiSettingsFromPrefs(r?.tmspeech_prefs || {}).base))
+  .catch(() => {});
+
+//: 只维护**一条**动态规则（用户改地址就替换它）。
+const API_ORIGIN_RULE_ID = 90210;
+
+/**
+ * 给"用户配置的翻译 API 地址"去掉 `Origin`/`Referer` 请求头。
+ *
+ * 为什么需要（用户实测）：Ollama 默认只放行 localhost 页面，扩展发的是
+ * `Origin: chrome-extension://<ID>` → **403**，而 Web 版同配置能用。`Origin` 是禁止修改的
+ * 头，JS 层面删不掉，只能用 declarativeNetRequest。
+ * 范围刻意收得很紧：**只这一个 host**、只删这两个头、只作用于本扩展发起的请求
+ * （`initiatorDomains: [chrome.runtime.id]`），对网页与其它域名零影响。
+ * 对非 Ollama 的服务同样安全（云端 API 一般不看 Origin；删掉也无副作用）。
+ */
+async function syncApiOriginRule(base: string) {
+  try {
+    const dnr: any = (chrome as any).declarativeNetRequest;
+    if (!dnr?.updateDynamicRules) return;                 // 老版本/权限缺失：静默跳过，报错文案兜底
+    const pattern = originPatternFor(base);
+    const existing = await dnr.getDynamicRules();
+    const current = existing.find((r: any) => r.id === API_ORIGIN_RULE_ID);
+    const same = !!current
+      && current.condition?.urlFilter === pattern
+      && Array.isArray(current.condition?.initiatorDomains)
+      && current.condition.initiatorDomains[0] === chrome.runtime.id;
+    // 规则没变化就**什么都不做**：既不重写、也不打日志。
+    // 这条同步会被面板每次保存/测试翻译/SW 冷启动各调一次，早先每次都打一行 →
+    // 用户日志区被"已为该地址移除 Origin/Referer 请求头…"刷屏（实测反馈）。
+    if (same) return;
+    const removeRuleIds = existing.filter((r: any) => r.id === API_ORIGIN_RULE_ID).map((r: any) => r.id);
+    if (!pattern) {
+      if (removeRuleIds.length) await dnr.updateDynamicRules({ removeRuleIds });
+      return;
+    }
+    await dnr.updateDynamicRules({
+      removeRuleIds,
+      addRules: [{
+        id: API_ORIGIN_RULE_ID,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders',
+          requestHeaders: [
+            { header: 'Origin', operation: 'remove' },
+            { header: 'Referer', operation: 'remove' },
+          ],
+        },
+        condition: {
+          urlFilter: pattern,
+          // **必须收窄到"本扩展发起的请求"** —— 这条是血的教训：先前为了排查扩展 403
+          // 把它去掉后，规则开始匹配**整个 profile 里所有发往该地址的请求**，包括 :8000
+          // 页面的 CORS 预检：页面预检的 Origin 被删掉 → Ollama 的 CORS 层不接管、落到路由
+          // → /v1/chat/completions 只注册 POST → **405 + Allow: POST** → 页面被 CORS 挡死。
+          // （用户用逐字节复刻证明了这一点：带 Origin → 204 全套 CORS 头；无 Origin → 405。）
+          initiatorDomains: [chrome.runtime.id],
+          resourceTypes: ['xmlhttprequest', 'other'],
+        },
+      }],
+    });
+    // 只在**真的装/换**规则时记一条（用户能据此确认规则已就位，且不再刷屏）
+    logLine('info', 'app', `已为该地址移除 Origin/Referer 请求头：${pattern}`);
+  } catch (e) {
+    // 规则下发失败不该影响翻译本身（顶多还是 403，报错文案会告诉用户怎么办）
+    logLine('warn', 'app', '同步翻译 API 的 Origin 规则失败: ' + e);
+  }
+}
 
 function sendToPopup(msg: any) {
   chrome.runtime.sendMessage(msg).catch(() => {});
@@ -252,6 +337,11 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       if (m?.type === 'MIC_RESULT' && m.ok !== true) {
+        // 盲审 P1-2/P2-2：mic 失败是**最常见**的错误，但它以前既不进日志缓冲、也没留住浮窗
+        // （浮窗正是授权弹框所在窗口）—— 用户只看到权限 UI 一闪，popup 已关，什么都没有。
+        logLine('error', 'app', '麦克风采集失败：' + String(m.error || '未知原因'));
+        keepFloatingForNotice = true;
+        notifyFloating('error', '麦克风采集失败：' + String(m.error || '未知原因'));
         // 文案走 i18n（双语）：权限被拒 / 无设备（系统禁用时 Chrome 不弹授权框直接拒，
         // NotFoundError 单列给排查指引）/ 被占用 / 其它失败分开表述；
         // micFailure 标记让面板把这类启动失败升级为模态（状态栏一行小字不够醒目）
@@ -302,7 +392,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // 测试是临时拉的 offscreen。只有当前没有识别会话、且这个文档不是正在跑会话的文档
       // 时才回收它——会话文档里装着已加载的 WASM/模型，误杀会立刻中断正在进行的识别。
       if (pipelineStatus !== 'Running' && !offscreenCfgKeyInMem) {
-        chrome.offscreen.closeDocument().catch(() => {});
+        selfCloseOffscreen();
       }
       return;
     }
@@ -463,6 +553,14 @@ chrome.runtime.onConnect.addListener((port) => {
     if (offscreenPort !== port) return;
     offscreenPort = null;
     if (pipelineStatus !== 'Running') return;
+    if (selfClosingPorts.has(port)) {
+      // 盲审 S3：这次断开是**我们自己**关文档造成的（START 换配置重建 / cleanupAll / 测试回收），
+      // 不能武装"重连超时"定时器 —— 否则 3 秒后会把刚起来的新会话整场拆掉。真断开（崩溃/被回收）
+      // 不会带这个标记，照旧武装。
+      selfClosingPorts.delete(port);
+      console.log('[TM BG] 断开来自我们自己的文档关闭，不武装重连定时器');
+      return;
+    }
     console.log('[TM BG] offscreen 断开，等待重连...');
     // 坑：只判 pipelineStatus==='Running' 不够——"Running 状态下重启会话"（START 里
     // 因配置变化而 closeDocument 重建）会在旧端口断开处武装本定时器，3 秒后把刚起来的
@@ -476,17 +574,14 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       console.log('[TM BG] 重连超时，清理');
-      // 此路径不走 cleanupAll，但同样要作废在途的 START 异步体，防止超时清理被残余启动代码"复活"。
-      sessionEpoch++;
-      pipelineStatus = 'Stopped';
-      if (captureTabId) {
-        sendToTab(captureTabId, { type: 'OVERLAY_TOGGLE', visible: false });
-        captureTabId = null;
-      }
-      chrome.storage.session.remove(PENDING_KEY);
-      persistSession();
-      sendToPopup({ type: 'STATUS_CHANGED', status: 'Stopped' });
-      sendToPopup({ type: 'ERROR', message: '后台页面意外关闭，识别已停止' });
+      // 坑（盲审 S2，major）：这条路径以前**手写收尾**，漏了 cleanupAll 的那些步骤 ——
+      // 悬浮字幕窗收不到任何终态/提示也没被关（停在"运行中"外观：最后一句字幕 + 可点的停止
+      // 按钮，用户以为还在识别），mic 会话更糟：没人发 MIC_CAPTURE_STOP，浮窗继续采集、
+      // 系统录音指示灯常亮（MIC_CHUNK 因 offscreenPort 为空被丢弃）。
+      // 直接复用 cleanupAll：它已经把这些都做对了（含保留浮窗时的 MIC_CAPTURE_STOP 与终态补发）。
+      logLine('error', 'app', '后台页面意外关闭，识别已停止');
+      cleanupAll();
+      return;
     }, 3000);
   });
 
@@ -514,6 +609,9 @@ async function handleRequestStream(tabId: number | null) {
     offscreenPort?.postMessage({ type: 'STREAM_READY', streamId, source: 'tab' });
   } catch (e: any) {
     console.log('[TM BG] 获取音频流失败:', e?.message || e);
+    // 盲审 S1（major）：这三条宿主级 ERROR 以前只 sendToPopup —— 而点开始后 popup 必然已关闭，
+    // 于是"所有日志"里恰好没有原因。补齐进日志缓冲。
+    logLine('error', 'app', `获取音频流失败: ${e?.message || e}`);
     sendToPopup({ type: 'ERROR', message: `获取音频流失败: ${e?.message || e}` });
     cleanupAll();
   }
@@ -556,7 +654,7 @@ function cleanupAll() {
   if (offscreenPort) {
     try { offscreenPort.postMessage({ type: 'STOP_OFFSCREEN' }); } catch {}
   }
-  chrome.offscreen.closeDocument().catch(() => {});
+  selfCloseOffscreen();
   chrome.storage.session.remove(OFFSCREEN_CFG_KEY).catch(() => {});
   offscreenCfgKeyInMem = null;
   // offscreenPort 不在这里手动置空：closeDocument 触发的 port.onDisconnect 会负责清它，
@@ -574,13 +672,20 @@ function cleanupAll() {
   // 例外：刚发了错误提示时留着它，让用户读得到原因（否则"闪一下就消失"）。用户点提示即关窗
   // （见 overlay 的 onNoticeDismiss）。
   if (keepFloatingForNotice) {
-    keepFloatingForNotice = false;
+    // 坑（盲审 S2，major）：这里**不能**把标志清掉 —— 错误收敛往往不止一次 cleanupAll
+    // （引擎先 `toPanel(ERROR)` 再 `requestStop()` 走 FW_STOP），第一次保留浮窗后标志被清，
+    // 紧随其后的第二次就走到 else 分支 `closeFloating()`，用户只看到"闪一下消失"，
+    // 原因又不可见。现在标志保留到**下一次 START**（见 START_RECOGNITION），
+    // 用户点掉提示本身就会关窗（overlay 的 onNoticeDismiss）。
     // 复核 P0-2（真 bug）：留着浮窗时**必须显式停 mic** —— 浮窗就是麦克风的采集端，
     // 会话已经 Stopped 却没人发 MIC_CAPTURE_STOP，麦克风会一直热着（指示灯常亮），
     // 而且下一场 system/helper 会话复用同一窗口时，旧 mic 的 MIC_CHUNK 会被喂进新管道
     // （系统音频里混进麦克风声音）。tab 会话没有浮窗，但 pendingNotice 也要清掉，
     // 否则以后"不走 START 就开浮窗"的路径会把上一条旧错误回播出去（复核 P2-9）。
-    pendingNotice = null;
+    // 盲审 M1（major）：**这里不能清 pendingNotice** —— 错误发生在浮窗端口还没连上时，
+    // `notifyFloating` 刚把它排进队，同一次收敛的 cleanupAll 就把它清掉 → 窗口留着却
+    // **没有任何原因**（只剩"已停止"）。只有真的投递过（onConnect 补发）或下一次 START
+    // （clearFloatingNotice）才该清。
     if (wasMic) sendToFloating({ type: 'MIC_CAPTURE_STOP' });
   } else {
     closeFloating();
@@ -685,6 +790,9 @@ async function startRecognition(msg: any, respond: () => void) {
       if (!offscreenPort) reuseDoc = false; // 连不上 → 降级为重建，避免 INIT 投递不进去的静默失败
     }
     if (!reuseDoc) {
+      // 盲审（major）：这条分支必须也盖"自关闭"戳，否则旧断开会武装 3 秒重连定时器 ——
+      // 而本次 START 已自增过 sessionEpoch，代次守卫恒不生效 → 3 秒后把刚起来的会话整场拆掉。
+      if (offscreenPort) selfClosingPorts.add(offscreenPort);
       await chrome.offscreen.closeDocument().catch(() => {});
       if (stale()) { respond(); return; }
       // closeDocument 会触发 onDisconnect 置空 offscreenPort
@@ -794,6 +902,9 @@ async function startRecognition(msg: any, respond: () => void) {
     const tdir = prefs.translationDirection;
     initMsg.translationDirection = tdir === 'zh-en' || tdir === 'en-zh' ? tdir : 'auto';
     initMsg.translationTiming = prefs.translationTiming === 'final' ? 'final' : 'stream';
+    // 翻译来源 + OpenAI 兼容 API 配置（地址/模型/Key、自定义 Headers 与请求体字段、推理控制）
+    // 一起随 INIT 下发；全部来自持久化偏好，缺省走内置离线模型。
+    initMsg.translationApi = apiSettingsFromPrefs(prefs);
     // 热词随 INIT 下发：offscreen 建 recognizer 时一次性烘焙进配置
     if (sessionHotwords) initMsg.hotwords = sessionHotwords;
     if (offscreenPort) {
@@ -815,6 +926,7 @@ async function startRecognition(msg: any, respond: () => void) {
     // （epoch 已前进），这里的 cleanupAll() 会把**新会话**整个拆掉，再弹一条与用户
     // 操作无关的"启动失败"——旧实现正是 P1-5 双创建异常的放大器。
     if (stale()) { respond(); return; }
+    logLine('error', 'app', `启动失败: ${e}`);   // 盲审 S1：popup 已关时这条错误只有日志能留住
     sendToPopup({ type: 'ERROR', message: `启动失败: ${e}` });
     cleanupAll();
     respond();
@@ -822,6 +934,11 @@ async function startRecognition(msg: any, respond: () => void) {
 }
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.type === 'SYNC_API_ORIGIN') {
+    // 面板每次保存 API 设置都同步一次（改地址就替换规则；清空地址就撤掉规则）
+    void syncApiOriginRule(String(msg.base || ''));
+    return;
+  }
   if (msg.type === 'GET_LOGS') {
     sendResponse({ entries: bgLogs.list() });
     return;
@@ -851,8 +968,14 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
       if (!offscreenPort) { sendResponse({ ok: false, error: 'offscreen-not-ready' }); return; }
       const id = ++translateTestSeq;
+      // 一起把「翻译来源 + API 配置」送过去：测试翻译是"还没开始识别也想试模型"的场景，
+      // 那个 offscreen 文档没跑过 INIT，不带配置就只能按内置模型测（用户实测报 no-model）。
+      const prefsR = await chrome.storage.local.get('tmspeech_prefs').catch(() => ({} as any));
+      const api = msg.api || apiSettingsFromPrefs((prefsR as any)?.tmspeech_prefs || {});
+      // 测试前再同步一次规则：用户可能刚改完地址就点测试（避免"先测后生效"的假失败）
+      void syncApiOriginRule(api.base);
       translateTestResolvers[id] = sendResponse;
-      offscreenPort.postMessage({ type: 'TRANSLATE_TEST', id, text: msg.text, direction: msg.direction });
+      offscreenPort.postMessage({ type: 'TRANSLATE_TEST', id, text: msg.text, direction: msg.direction, api });
     })();
     return true;
   }
@@ -867,6 +990,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   }
 
   if (msg.type === 'START_RECOGNITION') {
+    keepFloatingForNotice = false;   // 新会话开始：上一场的"保留浮窗读原因"使命结束（盲审 S2）
     // 启动体已抽成独立函数（startRecognition）：tab/system/mic 三态共用同一套
     // 竞态防护（代次核对、旧文档释放等待、pending 投递队列），此处只做通道收口。
     startRecognition(msg, () => sendResponse({}));
@@ -980,6 +1104,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       enabled: msg.enabled,
       direction: msg.direction,
       timing: msg.timing,
+      api: msg.api,
     });
   }
 

@@ -36,11 +36,15 @@ export function normalizeMessage(message: unknown): string {
 
 //: 进程内自增序号，与时间戳一起构成 id（同一毫秒内的多条也不会撞）。
 let idSeq = 0;
+//: 每个 JS 上下文一份的随机前缀。**必须要有**：面板(popup)每次打开都会重置 idSeq，
+//: 而面板与宿主是两个上下文 —— 只靠 `时间戳+序号` 会撞车，而 `dedupeLogs` 按 id 去重、
+//: 后传优先，撞车意味着**另一条不同内容的日志被静默丢掉**（盲审 P3-3）。
+const idPrefix = Math.random().toString(36).slice(2, 8);
 
 /** 生成一个日志 id（调用方只在**产生**日志时生成一次，之后一路沿用）。 */
 export function nextLogId(): string {
   idSeq += 1;
-  return `${Date.now().toString(36)}-${idSeq.toString(36)}`;
+  return `${idPrefix}-${Date.now().toString(36)}-${idSeq.toString(36)}`;
 }
 
 /**

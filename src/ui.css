@@ -626,6 +626,25 @@ body[data-mode="light"] .subpanel-backdrop { background: rgba(15, 18, 24, 0.42);
 .subpanel-foot { margin-top: 2px; }
 /* 引导面板里的下载超链接（同 .translate-notice a 的强调色风格） */
 .subpanel a { color: var(--accent); text-decoration: none; }
+
+/* —— 翻译来源：OpenAI 兼容 API 表单 ——
+   与「热词词典」的输入框**同一套**表面色/圆角/等宽字体 + accent 焦点圈（用户明确要求照它做：
+   第一版我压根没写样式，裸 input 在深色主题下又白又丑）。 */
+#tapiBlock { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.tapi-row { display: flex; align-items: center; gap: 6px; }
+.tapi-row > label { flex: 0 0 92px; font-size: 11px; color: var(--text2); }
+.tapi-row.tapi-col { align-items: flex-start; }
+.tapi-col > label { padding-top: 6px; }
+.tapi-input, .tapi-area {
+  flex: 1 1 auto; min-width: 0;
+  background: var(--surface-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 8px; font: 400 12px/1.6 ui-monospace, Consolas, monospace;
+}
+.tapi-input { height: 28px; }
+.tapi-area { min-height: 48px; resize: vertical; }
+.tapi-input:focus, .tapi-area:focus { outline: 1.5px solid var(--accent); outline-offset: -1px; }
+.tapi-note { margin: 2px 0 0; font-size: 11px; color: var(--text2); line-height: 1.5; }
 .subpanel a:hover { text-decoration: underline; }
 /* 下载进度条（ASR 模型窗中窗） */
 .asr-progress-wrap { width: 100%; margin: 6px 0 2px; display: flex; flex-direction: column; gap: 3px; }
