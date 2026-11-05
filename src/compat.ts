@@ -14,7 +14,7 @@
 //
 // 纪律：本文件只依赖 platform.ts / i18n.ts，不 import chrome.*（跨宿主共享）；
 // DOM 骨架在 ui-body.html 的 #compatModal（两端同一份模板）。
-import { IS_EXTENSION, resolveUrl, storage } from './platform';
+import { IS_EXTENSION, HAS_PAGE_SOURCE, resolveUrl, storage } from './platform';
 import { getLang, tSync } from './i18n';
 
 type CheckLevel = 'blocker' | 'important' | 'advice';
@@ -81,18 +81,20 @@ function buildChecks(family: CompatReport['family'], major: number): CompatCheck
   add('Worker', 'important', typeof Worker === 'function');
   if (IS_EXTENSION) {
     // 扩展独有的两条**硬能力**（手机/平板的扩展平台是桌面 API 的子集，二者通常都没有）：
-    //   TabCap  —— 采集当前标签页音频的唯一途径（桌面扩展 API；Android 扩展平台未提供）
-    //   Offscreen —— 后台音频引擎的宿主（引擎跑在 offscreen 文档里；Android 一般没有）
-    // 缺任何一条，扩展的"点开始"都注定失败，所以在检测阶段就判 blocker（而不是让用户撞墙）。
+    //   TabCap  —— 桌面扩展采集标签页音频的途径；Android 扩展平台没有它 → 手机上改用
+    //              「当前标签页提取」（page 音源），所以**不再判 blocker**（缺它只提示）。
+    //   Offscreen —— 后台音频引擎的宿主（引擎跑在 offscreen 文档里）；任何音源都依赖它，
+    //              没有它扩展确实什么都做不了 → 保留 blocker。
     const c: any = typeof chrome !== 'undefined' ? chrome : undefined;
-    add('TabCap', 'blocker', typeof c?.tabCapture?.getMediaStreamId === 'function');
+    const tabCap = typeof c?.tabCapture?.getMediaStreamId === 'function';
+    add('TabCap', 'important', tabCap || HAS_PAGE_SOURCE);   // 没有 tabCapture 但有 page 兜底 → 可用
     add('Offscreen', 'blocker', typeof c?.offscreen?.createDocument === 'function');
-    // 手机/平板：即便上面两条碰巧存在，Android 也没有可用的系统/标签页音频采集后端
-    // （getDisplayMedia 在手机浏览器上"定义了但永远拒绝"）。判 blocker，避免给出"能用"的错觉。
+    // 手机/平板 UA 不再判 blocker：page 音源（页面媒体直采）在手机上完全可用。
+    // 仍记一条建议档，让用户知道"桌面体验更好"。
     const ua = navigator.userAgent || '';
     const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua)
       || ((navigator as any).maxTouchPoints > 1 && /Macintosh/i.test(ua));   // iPadOS 伪装桌面 UA
-    add('Mobile', 'blocker', !mobile);
+    add('Mobile', 'advice', !mobile);
   }
   if (!IS_EXTENSION) {
     // 跨源隔离 = COOP/COEP 响应头真的下发了（静态托管最常漏的配置）；扩展页豁免该限制
@@ -191,9 +193,13 @@ function fillCompatModal(report: CompatReport, lang: string): void {
   document.getElementById('compatVerdict')!.textContent =
     tSync(lang, 'compatDetected').replace('{name}', report.browser) + ' ' + tSync(lang, verdictKey);
   // 移动端/受限扩展平台的专门说明（用户实测反馈：手机版 Edge 装得上扩展，但点开始拿不到
-  // 标签页音频 —— 平台根本没有这个能力，必须在这里讲清"为什么"与"怎么办"，否则只剩一脸问号）。
-  const mobileFail = report.checks.some((c) => c.id === 'Mobile' && !c.ok)
-    || report.checks.some((c) => (c.id === 'TabCap' || c.id === 'Offscreen') && !c.ok);
+  // 标签页音频 —— 必须在这里讲清"为什么"与"怎么办"，否则只剩一脸问号）。
+  // 只在**真正不可用**时出现：Offscreen 缺失（任何音源都跑不起来），或移动端且连 page 音源都没有。
+  // （手机上 page 可用时不再弹这段说明 —— 否则明明能用的功能被说成"不支持"，用户会困惑。）
+  const pageOk = report.checks.some((c) => c.id === 'TabCap' && c.ok)
+    || (HAS_PAGE_SOURCE && report.checks.some((c) => c.id === 'TabCap'));
+  const mobileFail = report.checks.some((c) => c.id === 'Offscreen' && !c.ok)
+    || (report.checks.some((c) => c.id === 'Mobile' && !c.ok) && !pageOk);
   if (mobileFail) {
     const el = document.getElementById('compatVerdict')!;
     el.textContent += '\n' + tSync(lang, 'compatMobileNote');
