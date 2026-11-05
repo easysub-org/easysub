@@ -263,6 +263,7 @@ export class AsrEngine {
 
   async init(msg: InitOptions): Promise<void> {
     this.log('收到 INIT');
+    this.pageChunkLogged = false;   // 每场重置：页面采音的首块日志只在每场会话打一次
     this.sessionEpoch++;
     const epoch = this.sessionEpoch;
     this.reconnectTabId = msg.tabId ?? null;

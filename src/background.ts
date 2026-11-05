@@ -492,7 +492,7 @@ chrome.runtime.onConnect.addListener((port) => {
             || msg.payload.source === 'helper' || msg.payload.source === 'page'
             ? msg.payload.source : 'tab';
         sessionSource = reviveSource;
-        if (msg.payload.status === 'Running' && reviveSource !== 'tab') {
+        if (msg.payload.status === 'Running' && reviveSource !== 'tab' && reviveSource !== 'page') {
           // system/mic 模式自愈：无标签页可校验，直接恢复会话状态（悬浮窗/popup 靠扇出消息刷新）
           captureTabId = null;
           const backfill = !sessionStartedAt
@@ -848,7 +848,9 @@ async function startRecognition(msg: any, respond: () => void) {
     clearFloatingNotice();
     // 用户确认：音源为系统/麦克风 → 自动开悬浮字幕窗（无标签页可注入，悬浮窗是唯一显示端）；
     // 音源为标签页 → 关闭悬浮窗，字幕回到浏览器内叠层。失败仅记日志，不阻断识别启动。
-    if (source !== 'tab') {
+    // 坑（用户实测 bug）：'page' 是**有目标标签页**的（见上面 captureTabId），必须和 'tab' 一样
+    // 走"叠层显示、不开浮窗"分支 —— 落进第一个分支会多开一个悬浮窗（手机上还可能开不出来）。
+    if (source !== 'tab' && source !== 'page') {
       // 坑（跨仓审查 P1，回归）：**麦克风的采集端就住在悬浮字幕窗里** —— Chrome 禁止 offscreen
       // 调 getUserMedia，所以 mic 的 PCM 只能由浮窗里的 floating.ts 采集后回传。于是这个窗口
       // 对 mic 是"采集设备"而不仅是"显示端"：如果因为用户取消了「显示字幕」就不开窗，
@@ -957,11 +959,20 @@ async function startRecognition(msg: any, respond: () => void) {
         logLine('info', 'app', '[页面采音] 已注入内容脚本并开始采集');
       } catch (e: any) {
         if (stale()) { respond(); return; }
+        // 坑（自查）：注入失败若不收敛，会话会停在"识别中"却永远没有音频 —— 正是本仓最忌讳的
+        // 幽灵会话。这里和 tab 捕获失败同款处理：记错误 + 弹提示 + cleanupAll 回到停止态。
         logLine('error', 'app', `[页面采音] 注入失败: ${e?.message || e}`);
         sendToPopup({ type: 'ERROR', message: `页面采音注入失败: ${e?.message || e}` });
+        cleanupAll();
+        respond();
+        return;
       }
     } else if (source === 'page') {
       logLine('error', 'app', '[页面采音] 没有可用的目标标签页（msg.tabId 为空）');
+      sendToPopup({ type: 'ERROR', message: '页面采音需要当前标签页，但没有拿到标签页 id' });
+      cleanupAll();
+      respond();
+      return;
     }
 
     respond();

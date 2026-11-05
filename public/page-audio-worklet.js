@@ -28,7 +28,15 @@ class PageAudioTap extends AudioWorkletProcessor {
     this._count = 0;
     this._stopped = false;
     this.port.onmessage = (e) => {
-      if (e && e.data && e.data.type === 'stop') this._stopped = true;
+      const kind = e && e.data && e.data.type;
+      // start/stop 只控制"要不要回传 PCM"；旁路永远在，用户始终能听见声音
+      if (kind === 'stop') this._stopped = true;
+      else if (kind === 'start') {
+        this._stopped = false;
+        this._filled = 0;
+        this._sumSq = 0;
+        this._count = 0;
+      }
     };
   }
 

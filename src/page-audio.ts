@@ -34,6 +34,9 @@ interface PageAudioState {
   workletReady: boolean;
   graphs: WeakMap<HTMLMediaElement, PageAudioGraph>;
   elements: Set<HTMLMediaElement>;
+  /** 混音总线 + 唯一的 worklet 节点（所有媒体元素汇到这里，避免多节点交错/多份 worklet）。 */
+  mix: GainNode | null;
+  tap: AudioWorkletNode | null;
   chunks: number;
   silentChunks: number;
   silenceReported: boolean;
@@ -49,6 +52,8 @@ function createState(): PageAudioState {
     workletReady: false,
     graphs: new WeakMap(),
     elements: new Set(),
+    mix: null,
+    tap: null,
     chunks: 0,
     silentChunks: 0,
     silenceReported: false,
@@ -92,6 +97,14 @@ async function ensureContext(): Promise<AudioContext | null> {
     // worklet 走 web_accessible_resources（见 manifest），必须用扩展 URL 加载
     await ctx.audioWorklet.addModule(chrome.runtime.getURL('page-audio-worklet.js'));
     state.workletReady = true;
+    // 混音总线 + 唯一 worklet：位置与生命周期与 ctx 绑定（**只建一次**，stop 时不销毁）
+    const mix = ctx.createGain();
+    const tap = new AudioWorkletNode(ctx, 'page-audio-tap', { processorOptions: { frameSamples: 2048 } });
+    mix.connect(tap);
+    tap.connect(ctx.destination);   // 旁路：用户照常听见声音
+    tap.port.onmessage = onFrame;
+    state.mix = mix;
+    state.tap = tap;
     diag(`worklet=ok ctx=${ctx.state} sr=${ctx.sampleRate}`);
     return ctx;
   } catch (e: any) {
@@ -132,12 +145,12 @@ async function attach(el: HTMLMediaElement): Promise<void> {
   if (!ctx || !state.workletReady || state.graphs.has(el)) return;
   try {
     const source = ctx.createMediaElementSource(el);
-    const node = new AudioWorkletNode(ctx, 'page-audio-tap', { processorOptions: { frameSamples: 2048 } });
-    source.connect(node);
-    // 旁路：必须接回 destination，否则用户听不见声音（我们只做"分出一路"，不改声音）
-    node.connect(ctx.destination);
-    node.port.onmessage = onFrame;
-    state.graphs.set(el, { node });
+    // 所有元素汇入**同一条混音总线** → 唯一的 worklet → destination：
+    // ① 多元素不会各自发帧、互相交错；② 只跑一份 worklet；
+    // ③ 旁路接回 destination（经 worklet 透传），用户照常听见声音。
+    if (!state.mix || !state.tap) throw new Error('音频总线未就绪');
+    source.connect(state.mix);
+    state.graphs.set(el, { node: state.tap });
     state.elements.add(el);
     diag(`已接入媒体元素（累计 ${state.elements.size}）`);
   } catch (e: any) {
@@ -207,27 +220,20 @@ function start(): void {
     state.port = null;
   }
   diag(`开始：media=${document.querySelectorAll('video, audio').length}`);
+  // 上一次 stop() 让 worklet 停止上报了，这里恢复（AudioContext 与元素图是复用的）
+  try { state.tap?.port.postMessage({ type: 'start' }); } catch { /* ignore */ }
   resumeOnGesture();
   bindListeners();
   scan();
 }
 
 function stop(): void {
-  if (!state.running && !state.port) {
-    // 仍然清一次图，防止"注入-启动失败-停止"后残留
-  }
   state.running = false;
   unbindListeners();
-  for (const el of Array.from(state.elements)) {
-    const g = state.graphs.get(el);
-    try { g?.node.port.postMessage({ type: 'stop' }); } catch { /* ignore */ }
-    try { g?.node.disconnect(); } catch { /* ignore */ }
-    state.graphs.delete(el);
-  }
-  state.elements.clear();
-  try { state.ctx?.close(); } catch { /* ignore */ }
-  state.ctx = null;
-  state.workletReady = false;
+  // **不销毁 AudioContext / 不断开元素**：createMediaElementSource 对每个元素只能调用一次，
+  // 关掉 ctx 或删掉映射后，本页第二次开始就再也接不回来了（会永久静音）。
+  // 这里只让 worklet 停止上报（旁路照旧，用户仍能听见声音），端口断开即可。
+  try { state.tap?.port.postMessage({ type: 'stop' }); } catch { /* ignore */ }
   try { state.port?.disconnect(); } catch { /* ignore */ }
   state.port = null;
 }

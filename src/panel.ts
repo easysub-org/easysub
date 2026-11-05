@@ -672,18 +672,9 @@ async function loadPrefs() {
     : prefs.audioSource === 'page' ? 'page'
     : (HAS_TAB_SOURCE ? 'tab' : DEFAULT_AUDIO_SOURCE);
   selSource.value = savedSource;
-  // 手机/平板：没有 tabCapture → 「当前标签页」必然失败，直接禁用（选中残值也换掉）；
-  // 移动端 getDisplayMedia 没有音频 → 「系统音频」同理禁用。让用户只看到能用的选项。
-  if (!HAS_TAB_SOURCE) {
-    const optTabEl = $opt('optSourceTab') as HTMLOptionElement | null;
-    if (optTabEl) optTabEl.disabled = true;
-    if (selSource.value === 'tab') selSource.value = HAS_PAGE_SOURCE ? 'page' : 'mic';
-  }
-  if (!SYSTEM_AUDIO_SUPPORTED) {
-    const optSysEl = $opt('optSourceSystem') as HTMLOptionElement | null;
-    if (optSysEl) optSysEl.disabled = true;
-    if (selSource.value === 'system') selSource.value = HAS_PAGE_SOURCE ? 'page' : 'mic';
-  }
+  // 坑（用户实测 bug）：这里**绝不能禁用/静默改写**不支持的音源 —— 本文件既有原则是
+  // "不静默改写用户的显式选择，支持与否由 updateSourceHint 当面告知"（与 system 的处理一致）。
+  // 禁用会让用户不知道发生了什么；而且 Linux 上「系统音频」本来就是可选但会给出解释的。
   updateSourceHint();
   if (prefs.fontSize) {
     fontSizeSlider.value = String(prefs.fontSize);
@@ -776,9 +767,14 @@ function updateSourceHint() {
     sourceHintEl.hidden = !overridden;
     return;
   }
-  if (selSource.value === 'mic') {
-    sourceHintEl.textContent = tSync(currentLang, 'sourceHintMic');
+  if (selSource.value === 'tab' && !HAS_TAB_SOURCE) {
+    // 与 system 一致：**仍然可选**，选中后当面告知为什么不行 + 该改用哪个
+    sourceHintEl.textContent = tSync(currentLang, 'sourceHintNoTab');
     sourceHintEl.hidden = false;
+    return;
+  }
+  if (selSource.value === 'mic') {
+    sourceHintEl.textContent = tSync(currentLang, 'sourceHintMic');    sourceHintEl.hidden = false;
     return;
   }
   if (selSource.value === 'system') {
@@ -1646,6 +1642,9 @@ function readSelectedSource(): AudioSourceId {
   if (v === 'mic') return 'mic';
   if (v === 'system') return 'system';
   if (v === 'helper') return 'helper';
+  // 坑（用户实测 bug）：漏了 'page' → 选它会被映射成 tab/DEFAULT，既**不持久化**，
+  // START 时也按旧音源走。以后新增音源时这里必须同步。
+  if (v === 'page') return 'page';
   return HAS_TAB_SOURCE ? 'tab' : DEFAULT_AUDIO_SOURCE;
 }
 
