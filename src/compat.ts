@@ -68,7 +68,10 @@ function detectBrowser(): { name: string; family: CompatReport['family']; major:
 function buildChecks(family: CompatReport['family'], major: number): CompatCheck[] {
   const checks: CompatCheck[] = [];
   const add = (id: string, level: CheckLevel, ok: boolean) => checks.push({ id, level, ok });
-  add('Browser', 'blocker', family === 'chrome' || family === 'edge');
+  // 坑（合并前回归审查）：内核档位是"Chrome/Edge 优先，Chromium 系可用但未经充分测试（封顶 70）",
+  // 所以 **chromium 也必须通过这条 blocker** —— 否则我新加的"blocker 失败即 0 分"会把
+  // Brave/Opera/Vivaldi 这些能正常跑的浏览器判成"不兼容、强烈建议更换"（原有行为是 70 分中档）。
+  add('Browser', 'blocker', family === 'chrome' || family === 'edge' || family === 'chromium');
   add('Version', 'important', major === 0 || major >= MIN_MAJOR);
   add('Wasm', 'important', typeof WebAssembly === 'object');
   // pthreads 构建的 wasm 需要共享内存；扩展页与 Web 页都真实依赖它，都检测
