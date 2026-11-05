@@ -92,7 +92,8 @@ function setupPort() {
           const initDone = engine.init({
             source: msg.source === 'system' ? 'system'
               : msg.source === 'mic' ? 'mic'
-              : msg.source === 'helper' ? 'helper' : 'tab',
+              : msg.source === 'helper' ? 'helper'
+              : msg.source === 'page' ? 'page' : 'tab',
             tabId: msg.tabId ?? null,
             lang: msg.lang,
             usePunct: msg.usePunct,
@@ -173,6 +174,11 @@ function setupPort() {
           // 坑：Port 走 JSON 克隆，ArrayBuffer 到这里已变成普通数组（见 floating.ts 注释），
           // 故这里按 number[] 还原；同时兼容直传 ArrayBuffer 的情形。
           engine.feedMicChunk(msg.audio, msg.sampleRate);
+          break;
+        case 'PAGE_AUDIO':
+          // 页面媒体直采入口（移动端/无 tabCapture 时的备用音源）：内容脚本 page-audio.ts
+          // 从页面 <video>/<audio> 分帧取 PCM → bg 转发到此 → 与 mic 同一条注入通道。
+          engine.feedPageChunk(msg.audio, msg.sampleRate);
           break;
         case 'STREAM_READY':
           // background 对 REQUEST_STREAM 的应答：拿到新鲜 streamId，立即开流。

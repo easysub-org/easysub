@@ -205,6 +205,8 @@ const strings: Record<string, Record<string, string>> = {
     exportHelp: '导出当前保存的字幕记录（含译文，若有）：TXT 纯文本 / SRT 字幕（可导入播放器）/ JSON 原数据。',
     // —— 音频来源：标签页 / 系统音频（desktopCapture）/ 麦克风 + 悬浮字幕窗 ——
     sourceTab: '当前标签页',
+    sourcePage: '当前标签页提取（备用，非安卓建议使用第一个当前标签页音源）',
+    sourceHintPage: '从当前网页里的播放器（<video>/<audio>）直接取音频，不需要屏幕共享、也不占用麦克风。它是「当前标签页」的备用方案（手机/平板上「当前标签页」不可用，只能用这个）。局限：受 DRM 保护的内容（如 Netflix）、跨站且未允许跨域的媒体、纯 Web Audio 合成的播放器、以及原生 App 里的声音都采集不到 —— 那些情况请改用麦克风或采音助手。',
     sourceSystem: '系统音频（整个屏幕）',
     sourceHintSystem: '开始识别后将弹出 Chrome 屏幕选择器：请选择「整个屏幕」并勾选「分享系统音频」（Windows / ChromeOS 全版本支持；macOS 需 Chrome 141+ 与 macOS 14.2+）。',
     sourceHintNoSysAudio: '当前设备不支持系统音频捕获（仅 Windows / ChromeOS / 新版 macOS 支持）。请改用「麦克风」来识别外放的声音。',
@@ -525,6 +527,8 @@ const strings: Record<string, Record<string, string>> = {
     exportLabel: 'Export',
     // —— Audio source: tab / system audio (desktopCapture) / microphone + floating window ——
     sourceTab: 'Current tab',
+    sourcePage: 'Extract from current tab (fallback; outside Android prefer the first "current tab audio" source)',
+    sourceHintPage: 'Takes the audio directly from the page\'s player (<video>/<audio>) — no screen sharing, no microphone. It is the fallback for "Current tab" (which does not exist on phones/tablets). Limits: DRM-protected media (e.g. Netflix), cross-origin media without CORS, Web-Audio-only players, and audio from native apps cannot be captured — use the microphone or the capture helper there.',
     sourceSystem: 'System audio (entire screen)',
     sourceHintSystem: 'After you press Start, Chrome shows a picker: choose "Entire screen" and tick "Share system audio" (Windows / ChromeOS all versions; macOS requires Chrome 141+ and macOS 14.2+).',
     sourceHintNoSysAudio: 'System audio capture is not supported on this device (Windows / ChromeOS / recent macOS only). Switch to "Microphone" to transcribe audio from your speakers.',

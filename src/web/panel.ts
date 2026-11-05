@@ -345,7 +345,9 @@ const hooks: PanelHostHooks = {
   // 音源下拉：Web 版没有"当前标签页"，摘掉该项
   customizeSources(sel) {
     sel.querySelector('option[value="tab"]')?.remove();
-    if (sel.value === 'tab') sel.value = 'system';
+    // 「当前标签页提取」（页面媒体直采）是**扩展端专属**：网页版不提供（用户明确要求）
+    sel.querySelector('option[value="page"]')?.remove();
+    if (sel.value === 'tab' || sel.value === 'page') sel.value = 'system';
   },
 
   // 系统音频提示：**Web 版不做平台限制**（用户明确要求）。

@@ -46,7 +46,9 @@ export const ERR_MODEL_MISSING = 'MODEL_MISSING';
 
 // 'helper' = 本机助手（easysub-helper）：PCM 由桌面进程采集后经 ws://127.0.0.1 送入，
 // 走 feedMicChunk 同一条注入通道（无 MediaStream、无选择器、无授权框）。见 src/helper.ts。
-export type EngineSource = 'tab' | 'system' | 'mic' | 'helper';
+// 'page' = 页面媒体直采（内容脚本 src/page-audio.ts）：只用于**移动端/无 tabCapture**的场景，
+// 从页面 <video>/<audio> 取音频后同样走 feedMicChunk 的注入通道（无 MediaStream）。
+export type EngineSource = 'tab' | 'system' | 'mic' | 'helper' | 'page';
 
 // 出站消息出口。两条通道与扩展既有协议同名：display=字幕显示端（页内叠层/悬浮窗），
 // panel=控制面板。Web 宿主里两者通常指向同一个页面上的不同区域。
@@ -107,6 +109,8 @@ export class AsrEngine {
   private reconnectTabId: number | null = null;
   private reconnectStreamId: string | null = null;
   private reconnectSource: EngineSource = 'tab';
+  /** 页面采音首块日志只打一次（诊断用，避免每块刷屏）。 */
+  private pageChunkLogged = false;
   private currentLang = 'zh_CN';
   private lastText = '';
   private prevSentence = '';
@@ -267,7 +271,8 @@ export class AsrEngine {
     this.reconnectStreamId = (msg as any).streamId || null;
     this.reconnectSource = msg.source === 'system' ? 'system'
       : msg.source === 'mic' ? 'mic'
-      : msg.source === 'helper' ? 'helper' : 'tab';
+      : msg.source === 'helper' ? 'helper'
+      : msg.source === 'page' ? 'page' : 'tab';
     if (msg.lang) this.currentLang = msg.lang;
     this.usePunct = msg.usePunct !== false;
 
@@ -1130,6 +1135,20 @@ export class AsrEngine {
     this.recordLevel(buf);
     const sr = sampleRate || 16000;
     this.pipeline.feedAudio(sr === 16000 ? buf : resample(buf, sr, 16000));
+  }
+
+  /**
+   * 页面媒体直采（source='page'）的音频入口：内容脚本从页面 <video>/<audio> 取 PCM，
+   * 经 background 逐块转发到这里。与 mic 共用同一条注入通道（电平测量、16k 重采样、
+   * 端点/标点逻辑全部一致）—— 不是新的采集管线，只是"音频从哪来"不同。
+   */
+  feedPageChunk(audio: ArrayBuffer | ArrayBufferView | number[], sampleRate?: number) {
+    if (!audio || !this.pipeline) return;
+    if (!this.pageChunkLogged) {
+      this.pageChunkLogged = true;
+      this.log(`[页面采音] 收到首块音频（${sampleRate || 16000}Hz）`);
+    }
+    this.feedMicChunk(audio, sampleRate);
   }
 
   async pipeCaptureStream(stream: MediaStream, source: EngineSource) {
