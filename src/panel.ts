@@ -1831,8 +1831,10 @@ async function doStart(): Promise<void> {
   // 走到这里说明用户已确认过，可以直接进入取流/启动。
   // 本次启动已正式受理：清掉确认态，下次点「开始」重新走一遍说明。
   pickConfirmPassed = false;
-  // 系统音频/麦克风模式不依赖活动标签页（captureTabId 恒 null，字幕走悬浮窗），跳过 noActiveTab 检查
-  if (source !== 'tab') {
+  // 系统音频/麦克风模式不依赖活动标签页（captureTabId 恒 null，字幕走悬浮窗），跳过 noActiveTab 检查。
+  // 坑（用户实测）：'page'（页面媒体直采）**需要目标标签页** —— 落进这个分支 START 就不带
+  // tabId，background 必然报「没有可用的目标标签页」（日志实锤）。必须与 'tab' 同路取 tabId。
+  if (source !== 'tab' && source !== 'page') {
     // 麦克风授权与采集都发生在悬浮字幕窗（可见页面）：popup 不再碰 getUserMedia——
     // offscreen 文档禁采麦克风、popup 内气泡又不可靠（挂死/被抑制），只有真窗口能弹框。
     // 不传 deviceId：由 Chrome 授权弹窗让用户选设备，浏览器记住所选，后续自动沿用。
