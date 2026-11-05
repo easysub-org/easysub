@@ -104,6 +104,22 @@ export function mountPanel(h: PanelHostHooks = {}) {
 const statusDot = $('statusDot');
 const btnStart = $('btnStart') as HTMLButtonElement;
 const btnStop = $('btnStop') as HTMLButtonElement;
+/**
+ * 手机/平板的扩展平台缺少核心采集能力（`tabCapture` 与 `offscreen`），点开始注定失败。
+ * 用户实测反馈：手机版 Edge 能装扩展，但拿不到标签页音频。这里在 init 阶段就判定并禁用开始键，
+ * 让用户在点之前就知道原因（详见 doStart 的守卫与 i18n `errMobileUnsupported`）。
+ * 注意：Web 版不拦（它可以用麦克风跑），所以只在扩展宿主里判。
+ */
+const unsupportedExtensionHost = typeof chrome !== 'undefined' && !!(chrome as any).runtime?.id
+  && (
+    // ① API 直接不存在（Android 扩展平台的常态）
+    !(typeof (chrome as any).offscreen?.createDocument === 'function'
+      && typeof (chrome as any).tabCapture?.getMediaStreamId === 'function')
+    // ② 手机/平板 UA：即便碰巧暴露了这两个 API，平台也没有可用的采集后端
+    //    （getDisplayMedia 在手机浏览器上一律拒绝），点开始只会得到一个看不懂的失败
+    || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '')
+  );
+if (unsupportedExtensionHost) btnStart.disabled = true;
 // —— 音频来源（tab=当前标签页 / system=系统音频 / mic=麦克风）——
 const selSource = $('selSource') as HTMLSelectElement;
 const sourceHintEl = $('sourceHint');
@@ -489,6 +505,7 @@ async function applyLang() {
   const tr = (key: string) => tSync(currentLang, key);
   $('appTitle').textContent = tr('appTitle');
   $('btnStartText').textContent = tr('btnStart');
+  if (unsupportedExtensionHost) btnStart.title = tr('errMobileUnsupported');
   $('btnStopText').textContent = tr('btnStop');
   $('audioSource').textContent = tr('audioSource');
   // 坑：sourceDesc 静态块已被音源下拉替换（#sourceDesc 元素不存在），
@@ -1648,6 +1665,12 @@ selSource.onchange = () => {
 // 「开始识别」应当直接弹屏幕选择器，而不是再被问一遍。
 let pickConfirmPassed = false;
 async function doStart(): Promise<void> {
+  // 手机/平板扩展平台：没有 tabCapture/offscreen，点开始必然失败（且报错看不懂）。
+  // 直接给一句可执行的说明（状态栏 + 日志），不再往下走。
+  if (unsupportedExtensionHost) {
+    log(tSync(currentLang, 'errMobileUnsupported'));
+    return;
+  }
   const pendingSource: AudioSourceId = readSelectedSource();
   // 桌面助手音源：**没连上就不许开始**（助手没运行/没配对 → 拦在门口，不启动）。
   // 只有「探测到了但未配对」才弹配对模态（配对码换来的设备令牌是助手认这个页面的唯一凭据；

@@ -284,6 +284,12 @@ function persistSession() {
 // 用模块级 in-flight promise 串行化，catch 后复查文档确实在就视为成功（被对手创建）。
 let ensureOffscreenInFlight: Promise<void> | null = null;
 async function ensureOffscreen() {
+  // 手机/平板的扩展平台没有 offscreen（后台音频引擎的宿主）→ 直接给可执行的解释。
+  // 不拦的话 START 会在 `chrome.offscreen.hasDocument()` 上抛 TypeError，
+  // 用户只看到"启动失败: Cannot read properties of undefined"（手机版 Edge 实测）。
+  if (typeof (chrome as any).offscreen?.createDocument !== 'function') {
+    throw new Error(await t('errMobileUnsupported'));
+  }
   const exists = await chrome.offscreen.hasDocument();
   if (exists) return;
   if (ensureOffscreenInFlight) {
@@ -601,6 +607,11 @@ async function checkPendingInit(port: chrome.runtime.Port) {
 // 仅 tab 模式有这个往返（system 模式由 offscreen 内 getDisplayMedia 直接开流，无 streamId）。
 async function handleRequestStream(tabId: number | null) {
   try {
+    // 手机/平板的扩展平台没有 tabCapture（桌面扩展 API）→ 给出可执行的解释，
+    // 而不是抛 "Cannot read properties of undefined (reading 'getMediaStreamId')"。
+    if (typeof (chrome as any).tabCapture?.getMediaStreamId !== 'function') {
+      throw new Error(await t('errMobileUnsupported'));
+    }
     // 坑：本 SW 可能刚被这条消息唤醒、内存态全空，所以优先用 offscreen 随消息带来的
     // tabId（它记的是 INIT 时的目标页），绝不能依赖 captureTabId/pipelineStatus 做守卫。
     const target = tabId ?? captureTabId;

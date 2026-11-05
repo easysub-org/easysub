@@ -79,6 +79,21 @@ function buildChecks(family: CompatReport['family'], major: number): CompatCheck
   add('Worklet', 'important', !!ACtx && 'audioWorklet' in ACtx.prototype);
   add('Idb', 'important', !!indexedDB);
   add('Worker', 'important', typeof Worker === 'function');
+  if (IS_EXTENSION) {
+    // 扩展独有的两条**硬能力**（手机/平板的扩展平台是桌面 API 的子集，二者通常都没有）：
+    //   TabCap  —— 采集当前标签页音频的唯一途径（桌面扩展 API；Android 扩展平台未提供）
+    //   Offscreen —— 后台音频引擎的宿主（引擎跑在 offscreen 文档里；Android 一般没有）
+    // 缺任何一条，扩展的"点开始"都注定失败，所以在检测阶段就判 blocker（而不是让用户撞墙）。
+    const c: any = typeof chrome !== 'undefined' ? chrome : undefined;
+    add('TabCap', 'blocker', typeof c?.tabCapture?.getMediaStreamId === 'function');
+    add('Offscreen', 'blocker', typeof c?.offscreen?.createDocument === 'function');
+    // 手机/平板：即便上面两条碰巧存在，Android 也没有可用的系统/标签页音频采集后端
+    // （getDisplayMedia 在手机浏览器上"定义了但永远拒绝"）。判 blocker，避免给出"能用"的错觉。
+    const ua = navigator.userAgent || '';
+    const mobile = /Android|iPhone|iPad|iPod|Mobile/i.test(ua)
+      || ((navigator as any).maxTouchPoints > 1 && /Macintosh/i.test(ua));   // iPadOS 伪装桌面 UA
+    add('Mobile', 'blocker', !mobile);
+  }
   if (!IS_EXTENSION) {
     // 跨源隔离 = COOP/COEP 响应头真的下发了（静态托管最常漏的配置）；扩展页豁免该限制
     add('Isolated', 'important', !!window.crossOriginIsolated);
@@ -105,9 +120,11 @@ async function probeAssetHeaders(): Promise<boolean> {
 }
 
 // 评分：满分 100，重要项每缺一项 −15，建议项 −5；
+// **必须项缺失直接判 0 分**（以前 blocker 被跳过不扣分，于是"扩展在手机上缺 tabs 采集"也能拿高分 ✗）；
 // 内核分档封顶——非 Chrome/Edge 的 Chromium 系至多 70（可用但未经充分测试），
 // Firefox/Safari/未知内核至多 25（核心 API 大面积缺失或内核不支持）。
 function scoreReport(family: CompatReport['family'], checks: CompatCheck[]): number {
+  if (checks.some((c) => c.level === 'blocker' && !c.ok)) return 0;
   let score = 100;
   for (const c of checks) {
     if (c.ok || c.level === 'blocker') continue;
@@ -173,6 +190,14 @@ function fillCompatModal(report: CompatReport, lang: string): void {
     : report.score >= 60 ? 'compatVerdictMid' : 'compatVerdictBad';
   document.getElementById('compatVerdict')!.textContent =
     tSync(lang, 'compatDetected').replace('{name}', report.browser) + ' ' + tSync(lang, verdictKey);
+  // 移动端/受限扩展平台的专门说明（用户实测反馈：手机版 Edge 装得上扩展，但点开始拿不到
+  // 标签页音频 —— 平台根本没有这个能力，必须在这里讲清"为什么"与"怎么办"，否则只剩一脸问号）。
+  const mobileFail = report.checks.some((c) => c.id === 'Mobile' && !c.ok)
+    || report.checks.some((c) => (c.id === 'TabCap' || c.id === 'Offscreen') && !c.ok);
+  if (mobileFail) {
+    const el = document.getElementById('compatVerdict')!;
+    el.textContent += '\n' + tSync(lang, 'compatMobileNote');
+  }
   // 检查明细：按 必须/重要/建议 分组；通过=✓（绿），重要/必须失败=✗（红），建议失败=!（琥珀）
   const list = document.getElementById('compatList')!;
   list.innerHTML = '';
