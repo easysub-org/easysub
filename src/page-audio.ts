@@ -25,7 +25,6 @@
 interface PageAudioGraph { node: AudioWorkletNode }
 
 const INSTANCE_KEY = '__easysubPageAudio';
-const DIAG_SILENCE_AFTER_CHUNKS = 12;
 
 interface PageAudioState {
   running: boolean;
@@ -38,8 +37,6 @@ interface PageAudioState {
   mix: GainNode | null;
   tap: AudioWorkletNode | null;
   chunks: number;
-  silentChunks: number;
-  silenceReported: boolean;
   suspendedReported: boolean;
   listenersBound: boolean;
 }
@@ -55,8 +52,6 @@ function createState(): PageAudioState {
     mix: null,
     tap: null,
     chunks: 0,
-    silentChunks: 0,
-    silenceReported: false,
     suspendedReported: false,
     listenersBound: false,
   };
@@ -118,13 +113,11 @@ function onFrame(e: MessageEvent): void {
   const data = e.data as { samples?: Float32Array; rms?: number } | undefined;
   if (!data?.samples || !state.running || !state.port) return;
   state.chunks += 1;
-  const rms = typeof data.rms === 'number' ? data.rms : 0;
-  if (rms < 1e-4) state.silentChunks += 1;
-  // 诊断：静音或 ctx 被挂起时只报一次，避免刷屏（真机排查全靠这几行）
-  if (!state.silenceReported && state.chunks >= DIAG_SILENCE_AFTER_CHUNKS && state.silentChunks >= state.chunks - 1) {
-    state.silenceReported = true;
-    diag(`rms≈0（已收 ${state.chunks} 帧）：可能是 DRM/跨域媒体，浏览器不给音频数据`);
-  }
+  // 坑（用户实测）：这里原先有一条"rms≈0 → 可能 DRM/跨域"的诊断，但它**会误报** ——
+  // 内容脚本会被注入到同源子帧，子帧里没在出声的 <video>/<audio> 也会各报一条 rms≈0，
+  // 于是主页面明明有声音、日志却刷"抓不到音频"，把排查方向带偏（B 站实测就是这样）。
+  // 静音不是需要提示的异常：字幕出不来时用户看得到；真静音也无需诊断噪音。
+  // 因此只保留"ctx 被挂起"这一条**确定可判定**的诊断。
   if (!state.suspendedReported && state.ctx?.state === 'suspended') {
     state.suspendedReported = true;
     diag('ctx=suspended（浏览器暂停了 AudioContext）：请再点一次播放/开始');
@@ -213,8 +206,6 @@ function start(): void {
   if (!frameIsRelevant()) return;   // 跨域子帧不参与（广告 iframe 之类）
   state.running = true;
   state.chunks = 0;
-  state.silentChunks = 0;
-  state.silenceReported = false;
   state.suspendedReported = false;
   try {
     state.port = chrome.runtime.connect({ name: 'page-audio' });

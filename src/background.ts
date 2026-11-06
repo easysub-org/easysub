@@ -643,30 +643,21 @@ async function isContentScriptInjected(tabId: number): Promise<boolean> {
 /**
  * 确保字幕层（content.js）存在并处于"显示"状态，同时补齐权威锁态/字号/回看选项。
  *
- * 为什么需要它（用户实测：切换/刷新后"音频还在、字幕层整块消失"）：原来的注入逻辑是
- * `isContentScriptInjected()` 探测一次 + `.catch(() => {})` 静默吞错，而 `sendToTab` 也是
- * fire-and-forget。只要探测/注入在导航竞态里失败一次（页面刚 complete、或注入被拒），
- * 之后所有的 OVERLAY_TOGGLE 全部静默失效 —— 表现为识别在跑、声音也有、但没有任何字幕，
- * 而且**日志里一个字都没有**，完全无法排查。
+ * 关键决定（用户实测：**刷新后字幕窗消失**，而且"以前都是好的"）：
+ * **不做 PING 探测，直接注入**。原因有两层：
+ *  ① content.ts 自身就是"后来者接管"的设计 —— `create()` 按 DOM id 移除旧节点、消息处理
+ *     全部幂等，多副本并存也只显示一层字幕（见 src/content.ts 顶部注释）；
+ *  ② 原来的 `isContentScriptInjected()` 探测在导航竞态/扩展重载后会给出**错误答案**：
+ *     答"已存在"就不再注入，而实际那一份已经被页面卸载带走 → 之后所有 OVERLAY_TOGGLE
+ *     全部落空 → 字幕永久消失到手动刷新为止。这个"看似优化、实则致命"的探测就是本节 bug 的根源。
  *
- * 这里做三件事：① 探测失败就注入，**最多重试 2 次**（间隔 400ms，等页面稳定）；
- * ② 每一步成败都写进日志缓冲，排查时有据可查；③ 注入成功后用 await 发送显示令并**再补一份**，
- * 覆盖"层刚建好还没挂监听"的窗口。
+ * 现在：每次都注入（幂等）+ 发显示令（失败补一次）+ 补锁态/字号/回看，每一步都写日志。
  */
 async function ensureOverlay(tabId: number, reason: string, forceVisible?: boolean): Promise<boolean> {
-  let injected = await isContentScriptInjected(tabId);
-  for (let attempt = 0; !injected && attempt < 2; attempt++) {
-    try {
-      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
-      injected = await isContentScriptInjected(tabId);
-      logLine('info', 'app', `[字幕层] ${reason}：注入 content.js（第 ${attempt + 1} 次）${injected ? '并探测通过' : '，探测仍未通过'}`);
-    } catch (e: any) {
-      logLine('warn', 'app', `[字幕层] ${reason}：注入 content.js 失败（第 ${attempt + 1} 次）：${e?.message || e}`);
-      await new Promise((r) => setTimeout(r, 400));
-    }
-  }
-  if (!injected) {
-    logLine('error', 'app', `[字幕层] ${reason}：content.js 无法注入（页面可能禁止脚本注入），字幕不会显示`);
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  } catch (e: any) {
+    logLine('error', 'app', `[字幕层] ${reason}：注入 content.js 失败：${e?.message || e}`);
     return false;
   }
   const prefs = (((await chrome.storage.local.get('tmspeech_prefs'))['tmspeech_prefs']) as any) || {};
@@ -674,26 +665,21 @@ async function ensureOverlay(tabId: number, reason: string, forceVisible?: boole
   // 显示与否：显式传来（START 时用 popup 的勾选态）优先，否则读偏好——
   // 保持既有语义：用户"隐藏字幕"的选择不会被导航/重启会话静默撤销。
   const wantVisible = forceVisible ?? (prefs.overlayVisible !== false);
-  if (!wantVisible) return true;   // 只要层在（供之后手动打开），不主动显示
-  const show = () => chrome.tabs.sendMessage(tabId, { type: 'OVERLAY_TOGGLE', visible: true }).catch(() => false);
-  const ok = await show();
-  if (ok === false) {
-    // 层可能刚被移除/还没挂监听：等一拍再补一次（这就是用户那条"字幕消失"的直接兜底）
-    await new Promise((r) => setTimeout(r, 250));
-    const retry = await show();
-    logLine(retry === false ? 'warn' : 'info', 'app',
-      `[字幕层] ${reason}：显示令${retry === false ? '重试仍失败' : '经重试已生效'}`);
+  const send = (msg: any) => chrome.tabs.sendMessage(tabId, msg).then(() => true).catch(() => false);
+  let ok = true;
+  if (wantVisible) {
+    ok = await send({ type: 'OVERLAY_TOGGLE', visible: true });
+    if (!ok) {
+      // 注入后监听器还没挂上/层刚被移除：等一拍补一次
+      await new Promise((r) => setTimeout(r, 200));
+      ok = await send({ type: 'OVERLAY_TOGGLE', visible: true });
+    }
+    logLine(ok ? 'info' : 'warn', 'app', `[字幕层] ${reason}：已注入并${ok ? '显示' : '显示令失败'}`);
   }
-  await chrome.tabs.sendMessage(tabId, { type: 'LOCK_TOGGLE', locked: lock }).catch(() => {});
-  if (prefs.fontSize) {
-    await chrome.tabs.sendMessage(tabId, { type: 'SET_FONT_SIZE', fontSize: prefs.fontSize }).catch(() => {});
-  }
-  await chrome.tabs.sendMessage(tabId, {
-    type: 'SET_PREV_OPTS',
-    showPrev: prefs.showPrev !== false,
-    prevOpacity: prefs.prevOpacity ?? 35,
-  }).catch(() => {});
-  return true;
+  await send({ type: 'LOCK_TOGGLE', locked: lock });
+  if (prefs.fontSize) await send({ type: 'SET_FONT_SIZE', fontSize: prefs.fontSize });
+  await send({ type: 'SET_PREV_OPTS', showPrev: prefs.showPrev !== false, prevOpacity: prefs.prevOpacity ?? 35 });
+  return ok;
 }
 
 function hideOverlay(tabId: number | null) {
@@ -905,11 +891,9 @@ async function startRecognition(msg: any, respond: () => void) {
     // （openFloating 命中已有窗口就复用），否则用户会对着一条已经不成立的错误等到开口说话。
     clearFloatingNotice();
     // 用户确认：音源为系统/麦克风 → 自动开悬浮字幕窗（无标签页可注入，悬浮窗是唯一显示端）；
-    // 音源为标签页 → 关闭悬浮窗，字幕回到浏览器内叠层。失败仅记日志，不阻断识别启动。
-    // 坑（用户实测）：'page' 虽然也有目标标签页，但**必须保留悬浮字幕窗** —— 用户预期是
-    // "有字幕 + 有悬浮窗"；先前把它和 'tab' 归为一类会 closeFloating()，表现为"字幕有、悬浮窗没了"。
-    // 显示消息本来就是双扇出（sendToDisplays：页内叠层 + 悬浮窗），两边同时显示是既有行为。
-    if (source !== 'tab') {
+    // 音源为标签页（**含 'page' 页面直采**）→ 关闭悬浮窗，字幕只走浏览器内叠层。
+    // 用户预期明确：新音源要和「当前标签页」一样"内嵌在页面里"，不要悬浮窗。
+    if (source !== 'tab' && source !== 'page') {
       // 坑（跨仓审查 P1，回归）：**麦克风的采集端就住在悬浮字幕窗里** —— Chrome 禁止 offscreen
       // 调 getUserMedia，所以 mic 的 PCM 只能由浮窗里的 floating.ts 采集后回传。于是这个窗口
       // 对 mic 是"采集设备"而不仅是"显示端"：如果因为用户取消了「显示字幕」就不开窗，
