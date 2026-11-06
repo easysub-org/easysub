@@ -1143,13 +1143,21 @@ export class AsrEngine {
    * 经 background 逐块转发到这里。与 mic 共用同一条注入通道（电平测量、16k 重采样、
    * 端点/标点逻辑全部一致）—— 不是新的采集管线，只是"音频从哪来"不同。
    */
-  feedPageChunk(audio: ArrayBuffer | ArrayBufferView | number[], sampleRate?: number) {
+  feedPageChunk(audio: ArrayBuffer | ArrayBufferView | number[], sampleRate?: number, chunkTs?: number) {
     if (!audio || !this.pipeline) return;
     if (!this.pageChunkLogged) {
       this.pageChunkLogged = true;
       this.log(`[页面采音] 收到首块音频（${sampleRate || 16000}Hz）`);
     }
+    const t0 = performance.now();
     this.feedMicChunk(audio, sampleRate);
+    // 延迟指示灯：这条链路没有 MediaStream，算不出 AudioWorklet↔主线程的 RTT；
+    // 改用**内容脚本采集时刻 → 进识别管道**的真实年龄（含 Port/SW/offscreen 转发耗时）
+    // + 本块同步处理耗时。与 tab/system 的口径一致（都是"处理链路延迟"的近似）。
+    const age = typeof chunkTs === 'number' && chunkTs > 0
+      ? Math.max(0, Date.now() - chunkTs)
+      : 0;
+    this.recordLatency(age, performance.now() - t0);
   }
 
   async pipeCaptureStream(stream: MediaStream, source: EngineSource) {

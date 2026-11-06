@@ -135,6 +135,9 @@ function onFrame(e: MessageEvent): void {
       type: 'PAGE_AUDIO_CHUNK',
       audio: Array.from(data.samples),   // Port/消息都走结构化克隆，转数组最稳（同 MIC_CHUNK）
       sampleRate: state.ctx?.sampleRate || 48000,
+      // 采集时刻（墙钟）：引擎侧用它算"从取出这一帧到进识别管道"的真实延迟，
+      // 供字幕层右下角的延迟指示灯显示（这条链路没有 MediaStream，算不出 RTT）。
+      ts: Date.now(),
     });
   } catch { /* 端口断开（会话结束/扩展重载）→ 下一次 stop 会清理 */ }
 }
