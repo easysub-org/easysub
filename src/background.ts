@@ -906,9 +906,10 @@ async function startRecognition(msg: any, respond: () => void) {
     clearFloatingNotice();
     // 用户确认：音源为系统/麦克风 → 自动开悬浮字幕窗（无标签页可注入，悬浮窗是唯一显示端）；
     // 音源为标签页 → 关闭悬浮窗，字幕回到浏览器内叠层。失败仅记日志，不阻断识别启动。
-    // 坑（用户实测 bug）：'page' 是**有目标标签页**的（见上面 captureTabId），必须和 'tab' 一样
-    // 走"叠层显示、不开浮窗"分支 —— 落进第一个分支会多开一个悬浮窗（手机上还可能开不出来）。
-    if (source !== 'tab' && source !== 'page') {
+    // 坑（用户实测）：'page' 虽然也有目标标签页，但**必须保留悬浮字幕窗** —— 用户预期是
+    // "有字幕 + 有悬浮窗"；先前把它和 'tab' 归为一类会 closeFloating()，表现为"字幕有、悬浮窗没了"。
+    // 显示消息本来就是双扇出（sendToDisplays：页内叠层 + 悬浮窗），两边同时显示是既有行为。
+    if (source !== 'tab') {
       // 坑（跨仓审查 P1，回归）：**麦克风的采集端就住在悬浮字幕窗里** —— Chrome 禁止 offscreen
       // 调 getUserMedia，所以 mic 的 PCM 只能由浮窗里的 floating.ts 采集后回传。于是这个窗口
       // 对 mic 是"采集设备"而不仅是"显示端"：如果因为用户取消了「显示字幕」就不开窗，
