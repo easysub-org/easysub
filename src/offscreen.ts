@@ -178,7 +178,7 @@ function setupPort() {
         case 'PAGE_AUDIO':
           // 页面媒体直采入口（移动端/无 tabCapture 时的备用音源）：内容脚本 page-audio.ts
           // 从页面 <video>/<audio> 分帧取 PCM → bg 转发到此 → 与 mic 同一条注入通道。
-          engine.feedPageChunk(msg.audio, msg.sampleRate);
+          engine.feedPageChunk(msg.audio, msg.sampleRate, msg.ts);
           break;
         case 'STREAM_READY':
           // background 对 REQUEST_STREAM 的应答：拿到新鲜 streamId，立即开流。
