@@ -16,7 +16,7 @@ import { dedupeLogs, formatEntry, nextLogId, normalizeMessage } from './logbus';
 import { getLang, setLang, tSync } from './i18n';
 import {
   storage, sendToHost, onMessageFromHost, getActiveTabId,
-  hasBundledResource, probeBundledResource, IS_EXTENSION, HAS_TAB_SOURCE, DEFAULT_AUDIO_SOURCE,
+  hasBundledResource, probeBundledResource, IS_EXTENSION, HAS_TAB_SOURCE, HAS_PAGE_SOURCE, DEFAULT_AUDIO_SOURCE,
 } from './platform';
 import { listModelKeys, saveModelFilesAtomic, saveModelBlob, getModelFile } from './model-db';
 import { TRANSCRIPT_MAX, clearTranscript } from './transcript-store';
@@ -42,7 +42,7 @@ const $opt = (id: string) => document.getElementById(id);
 export interface PanelHostHooks {
   // 「开始」按钮的第一件事（任何 await 之前）。返回对象会合并进 START_RECOGNITION 消息。
   // 抛错视为"用户取消了本次启动"，不再继续。
-  prepareStart?(source: 'tab' | 'system' | 'mic' | 'helper'): Promise<Record<string, any> | void>;
+  prepareStart?(source: AudioSourceId): Promise<Record<string, any> | void>;
   // 本次启动半路夭折（用户取消屏幕选择、环境不合格、模型没装、没有可用音源……）。
   // 宿主用它回收 prepareStart 里已经做掉的副作用——否则"预开的字幕浮窗"会孤零零留在
   // 屏幕上（用户以为已经开始识别了，实际什么都没跑）。扩展侧不注册（它没有预开窗口）。
@@ -54,7 +54,7 @@ export interface PanelHostHooks {
   customizeText?(lang: string): void;
   // 音源提示语覆盖：拿到 source 返回自定义文案，返回 undefined 走模板默认的 i18n 文案。
   // Web 版的系统音频走"共享标签页音频"也能用，提示语与扩展侧不是一回事。
-  sourceHint?(source: 'tab' | 'system' | 'mic' | 'helper', lang: string): string | undefined;
+  sourceHint?(source: AudioSourceId, lang: string): string | undefined;
   // 模型刚就绪（一键下载完成 / 手动导入成功）后的宿主动作。
   // 纯 Web 版用它在此时才注入 wasm 脚本（此前模型缺失，注入会留下半初始化的运行时），
   // 这样用户点「开始」时 wasm 往往已就绪，出字更快。扩展包内自带模型，无需此回调。
@@ -104,6 +104,17 @@ export function mountPanel(h: PanelHostHooks = {}) {
 const statusDot = $('statusDot');
 const btnStart = $('btnStart') as HTMLButtonElement;
 const btnStop = $('btnStop') as HTMLButtonElement;
+/**
+ * 手机/平板的扩展平台缺少核心采集能力（`tabCapture` 与 `offscreen`），点开始注定失败。
+ * 用户实测反馈：手机版 Edge 能装扩展，但拿不到标签页音频。这里在 init 阶段就判定并禁用开始键，
+ * 让用户在点之前就知道原因（详见 doStart 的守卫与 i18n `errMobileUnsupported`）。
+ * 注意：Web 版不拦（它可以用麦克风跑），所以只在扩展宿主里判。
+ */
+const unsupportedExtensionHost = typeof chrome !== 'undefined' && !!(chrome as any).runtime?.id
+  // 真正的硬阻塞只有一条：**没有 offscreen**（后台音频引擎的宿主）——任何音源都跑不起来。
+  // 手机/平板缺 tabCapture 不再阻塞：改用「当前标签页提取」（page，见 platform.ts 默认音源）。
+  && typeof (chrome as any).offscreen?.createDocument !== 'function';
+if (unsupportedExtensionHost) btnStart.disabled = true;
 // —— 音频来源（tab=当前标签页 / system=系统音频 / mic=麦克风）——
 const selSource = $('selSource') as HTMLSelectElement;
 const sourceHintEl = $('sourceHint');
@@ -489,6 +500,7 @@ async function applyLang() {
   const tr = (key: string) => tSync(currentLang, key);
   $('appTitle').textContent = tr('appTitle');
   $('btnStartText').textContent = tr('btnStart');
+  if (unsupportedExtensionHost) btnStart.title = tr('errMobileUnsupported');
   $('btnStopText').textContent = tr('btnStop');
   $('audioSource').textContent = tr('audioSource');
   // 坑：sourceDesc 静态块已被音源下拉替换（#sourceDesc 元素不存在），
@@ -498,6 +510,8 @@ async function applyLang() {
   // 是一整条链，抛错会让后面所有文案刷新与 renderTranscript 全部中断。
   const optTab = $opt('optSourceTab');
   if (optTab) optTab.textContent = tr('sourceTab');
+  const optPage = $opt('optSourcePage');
+  if (optPage) optPage.textContent = tr('sourcePage');
   const optSys = $opt('optSourceSystem');
   if (optSys) optSys.textContent = tr('sourceSystem');
   const optMic = $opt('optSourceMic');
@@ -655,8 +669,12 @@ async function loadPrefs() {
   const savedSource: AudioSourceId = prefs.audioSource === 'mic' ? 'mic'
     : prefs.audioSource === 'system' ? 'system'
     : prefs.audioSource === 'helper' ? 'helper'
+    : prefs.audioSource === 'page' ? 'page'
     : (HAS_TAB_SOURCE ? 'tab' : DEFAULT_AUDIO_SOURCE);
   selSource.value = savedSource;
+  // 坑（用户实测 bug）：这里**绝不能禁用/静默改写**不支持的音源 —— 本文件既有原则是
+  // "不静默改写用户的显式选择，支持与否由 updateSourceHint 当面告知"（与 system 的处理一致）。
+  // 禁用会让用户不知道发生了什么；而且 Linux 上「系统音频」本来就是可选但会给出解释的。
   updateSourceHint();
   if (prefs.fontSize) {
     fontSizeSlider.value = String(prefs.fontSize);
@@ -749,13 +767,24 @@ function updateSourceHint() {
     sourceHintEl.hidden = !overridden;
     return;
   }
-  if (selSource.value === 'mic') {
-    sourceHintEl.textContent = tSync(currentLang, 'sourceHintMic');
+  if (selSource.value === 'tab' && !HAS_TAB_SOURCE) {
+    // 与 system 一致：**仍然可选**，选中后当面告知为什么不行 + 该改用哪个
+    sourceHintEl.textContent = tSync(currentLang, 'sourceHintNoTab');
     sourceHintEl.hidden = false;
+    return;
+  }
+  if (selSource.value === 'mic') {
+    sourceHintEl.textContent = tSync(currentLang, 'sourceHintMic');    sourceHintEl.hidden = false;
     return;
   }
   if (selSource.value === 'system') {
     sourceHintEl.textContent = tSync(currentLang, SYSTEM_AUDIO_SUPPORTED ? 'sourceHintSystem' : 'sourceHintNoSysAudio');
+    sourceHintEl.hidden = false;
+    return;
+  }
+  if (selSource.value === 'page') {
+    // 页面媒体直采：只在扩展端存在；手机上（无 tabCapture）是默认音源
+    sourceHintEl.textContent = tSync(currentLang, 'sourceHintPage');
     sourceHintEl.hidden = false;
     return;
   }
@@ -1607,12 +1636,15 @@ function updateLockUI() {
 
 // 音源下拉 → 音源 id。四态统一在这里读，避免各处 if/else 漏掉新音源
 // （历史上就踩过：新增音源后某处回退逻辑把它静默降级成了 tab）。
-type AudioSourceId = 'tab' | 'system' | 'mic' | 'helper';
+type AudioSourceId = 'tab' | 'system' | 'mic' | 'helper' | 'page';
 function readSelectedSource(): AudioSourceId {
   const v = selSource.value;
   if (v === 'mic') return 'mic';
   if (v === 'system') return 'system';
   if (v === 'helper') return 'helper';
+  // 坑（用户实测 bug）：漏了 'page' → 选它会被映射成 tab/DEFAULT，既**不持久化**，
+  // START 时也按旧音源走。以后新增音源时这里必须同步。
+  if (v === 'page') return 'page';
   return HAS_TAB_SOURCE ? 'tab' : DEFAULT_AUDIO_SOURCE;
 }
 
@@ -1648,6 +1680,12 @@ selSource.onchange = () => {
 // 「开始识别」应当直接弹屏幕选择器，而不是再被问一遍。
 let pickConfirmPassed = false;
 async function doStart(): Promise<void> {
+  // 手机/平板扩展平台：没有 tabCapture/offscreen，点开始必然失败（且报错看不懂）。
+  // 直接给一句可执行的说明（状态栏 + 日志），不再往下走。
+  if (unsupportedExtensionHost) {
+    log(tSync(currentLang, 'errMobileUnsupported'));
+    return;
+  }
   const pendingSource: AudioSourceId = readSelectedSource();
   // 桌面助手音源：**没连上就不许开始**（助手没运行/没配对 → 拦在门口，不启动）。
   // 只有「探测到了但未配对」才弹配对模态（配对码换来的设备令牌是助手认这个页面的唯一凭据；
@@ -1793,8 +1831,10 @@ async function doStart(): Promise<void> {
   // 走到这里说明用户已确认过，可以直接进入取流/启动。
   // 本次启动已正式受理：清掉确认态，下次点「开始」重新走一遍说明。
   pickConfirmPassed = false;
-  // 系统音频/麦克风模式不依赖活动标签页（captureTabId 恒 null，字幕走悬浮窗），跳过 noActiveTab 检查
-  if (source !== 'tab') {
+  // 系统音频/麦克风模式不依赖活动标签页（captureTabId 恒 null，字幕走悬浮窗），跳过 noActiveTab 检查。
+  // 坑（用户实测）：'page'（页面媒体直采）**需要目标标签页** —— 落进这个分支 START 就不带
+  // tabId，background 必然报「没有可用的目标标签页」（日志实锤）。必须与 'tab' 同路取 tabId。
+  if (source !== 'tab' && source !== 'page') {
     // 麦克风授权与采集都发生在悬浮字幕窗（可见页面）：popup 不再碰 getUserMedia——
     // offscreen 文档禁采麦克风、popup 内气泡又不可靠（挂死/被抑制），只有真窗口能弹框。
     // 不传 deviceId：由 Chrome 授权弹窗让用户选设备，浏览器记住所选，后续自动沿用。

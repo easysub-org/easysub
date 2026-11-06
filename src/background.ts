@@ -25,7 +25,9 @@ let captureTabId: number | null = null;
 // 音频来源：'tab'=标签页捕获 | 'system'=系统音频（offscreen 内 getDisplayMedia 环回）
 // | 'mic'=麦克风。system/mic 模式无目标标签页，captureTabId 恒为 null，
 // "关标签页自动停止"/字幕层注入等 tab 逻辑全部天然跳过，字幕显示端为悬浮窗。
-let sessionSource: 'tab' | 'system' | 'mic' | 'helper' = 'tab';
+let sessionSource: 'tab' | 'system' | 'mic' | 'helper' | 'page' = 'tab';
+/** 页面采音（source='page'）的内容脚本端口集合：会话结束/切换时统一断开。 */
+const pageAudioPorts = new Set<any>();
 // 麦克风采集的宿主是悬浮字幕窗（可见扩展页）：Chrome 不允许 offscreen 文档做
 // getUserMedia 音频采集（报 NotAllowedError，权限气泡也无从展示），而系统音频的
 // getDisplayMedia 选择器是特批例外——所以 mic 模式的音频轨只能在悬浮窗里拿。
@@ -284,6 +286,12 @@ function persistSession() {
 // 用模块级 in-flight promise 串行化，catch 后复查文档确实在就视为成功（被对手创建）。
 let ensureOffscreenInFlight: Promise<void> | null = null;
 async function ensureOffscreen() {
+  // 手机/平板的扩展平台没有 offscreen（后台音频引擎的宿主）→ 直接给可执行的解释。
+  // 不拦的话 START 会在 `chrome.offscreen.hasDocument()` 上抛 TypeError，
+  // 用户只看到"启动失败: Cannot read properties of undefined"（手机版 Edge 实测）。
+  if (typeof (chrome as any).offscreen?.createDocument !== 'function') {
+    throw new Error(await t('errMobileUnsupported'));
+  }
   const exists = await chrome.offscreen.hasDocument();
   if (exists) return;
   if (ensureOffscreenInFlight) {
@@ -479,11 +487,12 @@ chrome.runtime.onConnect.addListener((port) => {
         if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
         console.log('[TM BG] offscreen 重连, status=', msg.payload.status, 'tabId=', msg.payload.tabId);
         pipelineStatus = msg.payload.status;
-        const reviveSource: 'tab' | 'system' | 'mic' | 'helper' =
+        const reviveSource: 'tab' | 'system' | 'mic' | 'helper' | 'page' =
           msg.payload.source === 'system' || msg.payload.source === 'mic'
-            || msg.payload.source === 'helper' ? msg.payload.source : 'tab';
+            || msg.payload.source === 'helper' || msg.payload.source === 'page'
+            ? msg.payload.source : 'tab';
         sessionSource = reviveSource;
-        if (msg.payload.status === 'Running' && reviveSource !== 'tab') {
+        if (msg.payload.status === 'Running' && reviveSource !== 'tab' && reviveSource !== 'page') {
           // system/mic 模式自愈：无标签页可校验，直接恢复会话状态（悬浮窗/popup 靠扇出消息刷新）
           captureTabId = null;
           const backfill = !sessionStartedAt
@@ -601,6 +610,11 @@ async function checkPendingInit(port: chrome.runtime.Port) {
 // 仅 tab 模式有这个往返（system 模式由 offscreen 内 getDisplayMedia 直接开流，无 streamId）。
 async function handleRequestStream(tabId: number | null) {
   try {
+    // 手机/平板的扩展平台没有 tabCapture（桌面扩展 API）→ 给出可执行的解释，
+    // 而不是抛 "Cannot read properties of undefined (reading 'getMediaStreamId')"。
+    if (typeof (chrome as any).tabCapture?.getMediaStreamId !== 'function') {
+      throw new Error(await t('errMobileUnsupported'));
+    }
     // 坑：本 SW 可能刚被这条消息唤醒、内存态全空，所以优先用 offscreen 随消息带来的
     // tabId（它记的是 INIT 时的目标页），绝不能依赖 captureTabId/pipelineStatus 做守卫。
     const target = tabId ?? captureTabId;
@@ -639,10 +653,20 @@ function cleanupAll() {
   // sessionSource 紧接着就会被重置成 'tab'（复核 P0-2 时正是这里踩了：判断写在重置之后，
   // 于是麦克风永不停止采集，tsc 还会报"两个类型没有交集"）。
   const wasMic = sessionSource === 'mic';
+  const wasPage = sessionSource === 'page';
   sessionSource = 'tab';
   const tabId = captureTabId;
   pipelineStatus = 'Stopped';
   hideOverlay(tabId);
+  // 页面采音：让内容脚本立刻停工并断开端口。不能只依赖"端口自然断开"——会话虽然停了，
+  // 内容脚本还在跑音频图（用户会以为还在采）；这里显式收尾。
+  if (wasPage) {
+    if (tabId != null) {
+      try { chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_STOP' }).catch(() => {}); } catch { /* ignore */ }
+    }
+    for (const p of pageAudioPorts) { try { p.disconnect(); } catch { /* ignore */ } }
+    pageAudioPorts.clear();
+  }
   chrome.storage.session.remove(PENDING_KEY);
   // 停止即回收（2026-09-22 用户决策，恢复旧行为）：会话结束**无条件**销毁 offscreen 文档。
   // 模型（__recognizer + WASM 堆，full 版 400MB+）活在文档里，只有销毁文档才能把内存
@@ -811,10 +835,12 @@ async function startRecognition(msg: any, respond: () => void) {
 
     pipelineStatus = 'Running';
     // 音频来源：system/mic 模式无目标标签页（captureTabId 恒 null），跳过字幕层注入等 tab 逻辑
-    const source: 'tab' | 'system' | 'mic' | 'helper' =
-      msg.source === 'system' || msg.source === 'mic' || msg.source === 'helper' ? msg.source : 'tab';
+    // 'page'（页面媒体直采）需要目标标签页：要往那里注入内容脚本、并按 tabId 过滤音频块
+    const source: 'tab' | 'system' | 'mic' | 'helper' | 'page' =
+      msg.source === 'system' || msg.source === 'mic' || msg.source === 'helper'
+        || msg.source === 'page' ? msg.source : 'tab';
     sessionSource = source;
-    captureTabId = source === 'tab' ? (msg.tabId || null) : null;
+    captureTabId = (source === 'tab' || source === 'page') ? (msg.tabId || null) : null;
     sessionStartedAt = Date.now(); // START 成功即盖会话开始戳，计时基准唯一事实源
     persistSession();
     // 独立审查 B2-A：新会话开始 → 上一场留下的错误提示必须撤掉。浮窗是跨会话复用的
@@ -822,7 +848,9 @@ async function startRecognition(msg: any, respond: () => void) {
     clearFloatingNotice();
     // 用户确认：音源为系统/麦克风 → 自动开悬浮字幕窗（无标签页可注入，悬浮窗是唯一显示端）；
     // 音源为标签页 → 关闭悬浮窗，字幕回到浏览器内叠层。失败仅记日志，不阻断识别启动。
-    if (source !== 'tab') {
+    // 坑（用户实测 bug）：'page' 是**有目标标签页**的（见上面 captureTabId），必须和 'tab' 一样
+    // 走"叠层显示、不开浮窗"分支 —— 落进第一个分支会多开一个悬浮窗（手机上还可能开不出来）。
+    if (source !== 'tab' && source !== 'page') {
       // 坑（跨仓审查 P1，回归）：**麦克风的采集端就住在悬浮字幕窗里** —— Chrome 禁止 offscreen
       // 调 getUserMedia，所以 mic 的 PCM 只能由浮窗里的 floating.ts 采集后回传。于是这个窗口
       // 对 mic 是"采集设备"而不仅是"显示端"：如果因为用户取消了「显示字幕」就不开窗，
@@ -920,6 +948,33 @@ async function startRecognition(msg: any, respond: () => void) {
       }
     }
 
+    // 页面媒体直采（source='page'）：往当前标签页注入内容脚本（含同源子帧）再通知开始。
+    // 注入失败不拆会话：写日志 + 提示，用户可切回其它音源重试。
+    if (source === 'page' && captureTabId) {
+      const tabId = captureTabId;
+      try {
+        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['page-audio.js'] });
+        if (stale()) { respond(); return; }
+        await chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
+        logLine('info', 'app', '[页面采音] 已注入内容脚本并开始采集');
+      } catch (e: any) {
+        if (stale()) { respond(); return; }
+        // 坑（自查）：注入失败若不收敛，会话会停在"识别中"却永远没有音频 —— 正是本仓最忌讳的
+        // 幽灵会话。这里和 tab 捕获失败同款处理：记错误 + 弹提示 + cleanupAll 回到停止态。
+        logLine('error', 'app', `[页面采音] 注入失败: ${e?.message || e}`);
+        sendToPopup({ type: 'ERROR', message: `页面采音注入失败: ${e?.message || e}` });
+        cleanupAll();
+        respond();
+        return;
+      }
+    } else if (source === 'page') {
+      logLine('error', 'app', '[页面采音] 没有可用的目标标签页（msg.tabId 为空）');
+      sendToPopup({ type: 'ERROR', message: '页面采音需要当前标签页，但没有拿到标签页 id' });
+      cleanupAll();
+      respond();
+      return;
+    }
+
     respond();
   } catch (e) {
     // 坑：catch 必须先核对代次。异常若来自"已被清理/被新 START 作废"的旧启动体
@@ -932,6 +987,29 @@ async function startRecognition(msg: any, respond: () => void) {
     respond();
   }
 }
+
+// 页面采音端口：内容脚本（每帧一个）→ 只接受**当前采集标签页**的音频块 → 转投 offscreen。
+// 为什么用 Port 而不是 sendMessage：每 40–90ms 一块，Port 省去反复序列化消息头，
+// 也天然提供"会话结束时断开"的生命周期信号（见 cleanupAll 的 wasPage 分支）。
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'page-audio') return;
+  const tabId = (port.sender as any)?.tab?.id ?? null;
+  pageAudioPorts.add(port);
+  port.onDisconnect.addListener(() => { pageAudioPorts.delete(port); });
+  port.onMessage.addListener((m: any) => {
+    if (m?.type === 'PAGE_AUDIO_CHUNK') {
+      // 只收当前会话、当前标签页的块：防止切换音源/换标签页后旧内容脚本继续喂音频
+      if (sessionSource !== 'page' || tabId == null || tabId !== captureTabId) return;
+      try {
+        offscreenPort?.postMessage({ type: 'PAGE_AUDIO', audio: m.audio, sampleRate: m.sampleRate });
+      } catch { /* offscreen 未就绪：丢弃本块（开始阶段的头几块，影响可忽略） */ }
+      return;
+    }
+    if (m?.type === 'PAGE_AUDIO_DIAG') {
+      logLine('info', 'app', `[页面采音] ${m.text}`);
+    }
+  });
+});
 
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === 'SYNC_API_ORIGIN') {

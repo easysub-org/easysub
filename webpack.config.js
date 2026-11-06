@@ -112,6 +112,8 @@ function extensionConfig() {
       floating: './src/floating.ts',
       'translation-worker': './src/translation-worker.ts',
       permission: './src/permission.ts',
+      // 页面媒体采音（内容脚本，按需由 background 用 chrome.scripting 注入；Web 版没有）
+      'page-audio': './src/page-audio.ts',
       i18n: './src/i18n.ts', // ponytail: 纯导出模块做 entry 生成孤立 i18n.js，不被任何页面引用
     },
     output: {

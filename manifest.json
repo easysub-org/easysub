@@ -30,7 +30,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["wasm/*"],
+      "resources": ["wasm/*", "page-audio-worklet.js"],
       "matches": ["<all_urls>"]
     }
   ],

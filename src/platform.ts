@@ -146,8 +146,21 @@ export function emitToPanel(msg: any): void {
 
 // 是否有"当前标签页"这个音源。扩展靠 tabCapture 抓标签页音频，Web 版拿不到，
 // 面板据此决定下拉里要不要出现该项、以及默认音源是什么。
-export const HAS_TAB_SOURCE = IS_EXTENSION;
-export const DEFAULT_AUDIO_SOURCE: 'tab' | 'system' | 'mic' = IS_EXTENSION ? 'tab' : 'system';
+// 坑（手机版 Edge 实测）：扩展**能装**但 Android 扩展平台没有 tabCapture —— 所以不能再按
+// "是不是扩展"来判断，必须按**能力**判断，否则手机上会显示一个永远失败的音源。
+const tabCaptureAvailable = IS_EXTENSION
+  && typeof (globalThis as any).chrome?.tabCapture?.getMediaStreamId === 'function';
+export const HAS_TAB_SOURCE = tabCaptureAvailable;
+/**
+ * 页面媒体直采（内容脚本 page-audio.ts）：**只在扩展端**提供（Web 版没有这个音源）。
+ * 它需要一个能跑识别引擎的宿主（offscreen），Android 上是支持的（Edge 官方 API 表）。
+ */
+export const HAS_PAGE_SOURCE = IS_EXTENSION
+  && typeof (globalThis as any).chrome?.offscreen?.createDocument === 'function';
+// 默认音源：有 tabCapture 用 tab（质量最好）；没有就用"页面提取"（安卓的默认）；
+// 都没有则退回 tab（面板会因缺引擎宿主而禁用开始并说明原因）。
+export const DEFAULT_AUDIO_SOURCE: 'tab' | 'system' | 'mic' | 'page' =
+  IS_EXTENSION ? (HAS_TAB_SOURCE ? 'tab' : (HAS_PAGE_SOURCE ? 'page' : 'tab')) : 'system';
 
 // 当前活动标签页 id。Web 版没有"标签页"概念（音源只有系统音频/麦克风），恒为 null。
 export async function getActiveTabId(): Promise<number | null> {
