@@ -28,6 +28,8 @@ let captureTabId: number | null = null;
 let sessionSource: 'tab' | 'system' | 'mic' | 'helper' | 'page' = 'tab';
 /** 页面采音（source='page'）的内容脚本端口集合：会话结束/切换时统一断开。 */
 const pageAudioPorts = new Set<any>();
+/** 页面采音最近一次"重注入"的时间：导航与端口断开会各触发一次，用它在 1.5s 内去重。 */
+let lastPageReinjectAt = 0;
 // 麦克风采集的宿主是悬浮字幕窗（可见扩展页）：Chrome 不允许 offscreen 文档做
 // getUserMedia 音频采集（报 NotAllowedError，权限气泡也无从展示），而系统音频的
 // getDisplayMedia 选择器是特批例外——所以 mic 模式的音频轨只能在悬浮窗里拿。
@@ -988,6 +990,25 @@ async function startRecognition(msg: any, respond: () => void) {
   }
 }
 
+// 页面采音：**重新注入内容脚本并恢复采集**（幂等；会话已停/音源已换/标签页已变时直接返回）。
+// 两处调用：整页导航后（onUpdated）、内容脚本端口断开后（onDisconnect 兜底）。
+async function reinjectPageAudio(tabId: number, reason: string): Promise<void> {
+  if (pipelineStatus !== 'Running' || sessionSource !== 'page' || captureTabId !== tabId) return;
+  // 去重：同一次导航会同时命中"onUpdated complete"与"端口断开"两条路，1.5s 内只做一次
+  const now = Date.now();
+  if (now - lastPageReinjectAt < 1500) return;
+  lastPageReinjectAt = now;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['page-audio.js'] });
+    if (pipelineStatus !== 'Running' || sessionSource !== 'page' || captureTabId !== tabId) return;
+    await chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
+    logLine('info', 'app', `[页面采音] ${reason} → 已重新注入并恢复采集`);
+  } catch (e: any) {
+    logLine('error', 'app', `[页面采音] ${reason} → 重注入失败: ${e?.message || e}`);
+    sendToPopup({ type: 'ERROR', message: `页面采音恢复失败: ${e?.message || e}` });
+  }
+}
+
 // 页面采音端口：内容脚本（每帧一个）→ 只接受**当前采集标签页**的音频块 → 转投 offscreen。
 // 为什么用 Port 而不是 sendMessage：每 40–90ms 一块，Port 省去反复序列化消息头，
 // 也天然提供"会话结束时断开"的生命周期信号（见 cleanupAll 的 wasPage 分支）。
@@ -995,7 +1016,16 @@ chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'page-audio') return;
   const tabId = (port.sender as any)?.tab?.id ?? null;
   pageAudioPorts.add(port);
-  port.onDisconnect.addListener(() => { pageAudioPorts.delete(port); });
+  port.onDisconnect.addListener(() => {
+    pageAudioPorts.delete(port);
+    // 兜底：内容脚本被销毁（整页导航 / 页面崩溃 / 被回退缓存丢掉）会断开端口，而 page 音源
+    // 没有 MediaStream track 可以兜底。这里补一次重注入（延迟一点，等新页面稳定；
+    // 失败只记日志、不重试 —— 避免在 chrome:// 之类无法注入的页面里刷屏成环）。
+    if (sessionSource === 'page' && pipelineStatus === 'Running' && tabId != null && tabId === captureTabId) {
+      const targetTab = tabId;
+      setTimeout(() => { void reinjectPageAudio(targetTab, '内容脚本已断开'); }, 800);
+    }
+  });
   port.onMessage.addListener((m: any) => {
     if (m?.type === 'PAGE_AUDIO_CHUNK') {
       // 只收当前会话、当前标签页的块：防止切换音源/换标签页后旧内容脚本继续喂音频
@@ -1266,5 +1296,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       if (prefs.fontSize) sendToTab(tabId, { type: 'SET_FONT_SIZE', fontSize: prefs.fontSize });
     });
     if (offscreenPort) offscreenPort.postMessage({ type: 'RESEND_CURRENT_TEXT' });
+
+    // 坑（审查抓到的幽灵会话）：**整页导航会销毁旧内容脚本** —— 音频图随之消失、Port 断开
+    // （onDisconnect 只是把它从 pageAudioPorts 删掉，静默），而 page 音源**没有 MediaStream
+    // track 可 watch**（tab/system 有 track ended 兜底，page 什么都没有）→ 界面停在"识别中"
+    // 却永远不再出字幕、也没有任何提示。页面音源的典型场景恰恰是视频站（看完一个点下一个），
+    // 所以这里必须和新页面同步**重注入 page-audio.js 并重新发采集令**。
+    // 注：SPA 路由（如站内换视频）不触发 complete、页面也没卸载 —— 那种情况由内容脚本里
+    // 捕获阶段的 play 监听接管（新播放器一播放就自动 attach），不需要这里处理。
+    await reinjectPageAudio(tabId, '页面已导航');
   }, 300);
 });
