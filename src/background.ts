@@ -698,6 +698,28 @@ function hideOverlay(tabId: number | null) {
   if (tabId) sendToTab(tabId, { type: 'OVERLAY_TOGGLE', visible: false });
 }
 
+/**
+ * 页面音源：刷新/导航后**重新注入 page-audio.js 并恢复采集**。
+ *
+ * 上一版这里踩过两个坑，本实现刻意避开：
+ *  ① `allFrames: true` —— B 站这类页面含跨域 iframe，整体注入可能失败；而页面音源只需要
+ *     **主帧**（播放器就在主帧），所以只注入主帧。
+ *  ② 失败时调 `cleanupAll()` —— 那会把**整场会话**拆掉，用户表现就是"刷新后彻底没音频"。
+ *     注入失败只是"这一页暂时采不到"，会话本身没问题，**绝不能拆**，记日志即可。
+ */
+async function restartPageAudio(tabId: number): Promise<void> {
+  if (pipelineStatus !== 'Running' || sessionSource !== 'page' || captureTabId !== tabId) return;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['page-audio.js'] });
+    if (pipelineStatus !== 'Running' || sessionSource !== 'page' || captureTabId !== tabId) return;
+    await chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
+    logLine('info', 'app', '[页面采音] 页面已刷新/导航 → 已重新注入并恢复采集');
+  } catch (e: any) {
+    // 只记日志：不要 cleanupAll（见函数注释 ②）
+    logLine('warn', 'app', `[页面采音] 导航后重注入失败：${e?.message || e}`);
+  }
+}
+
 function cleanupAll() {
   // 坑：任何清理都必须作废在途的 START 异步体——否则 STOP 后残余启动代码会重建
   // offscreen 文档并恢复采集（幽灵会话）。自增代次后，START 各恢复点的比对全部失配。
@@ -982,12 +1004,14 @@ async function startRecognition(msg: any, respond: () => void) {
       }
     }
 
-    // 页面媒体直采（source='page'）：往当前标签页注入内容脚本（含同源子帧）再通知开始。
-    // 注入失败不拆会话：写日志 + 提示，用户可切回其它音源重试。
+    // 页面媒体直采（source='page'）：往当前标签页注入内容脚本再通知开始。
+    // 只注入**主帧**：页面音源取主帧播放器的音频即可；`allFrames` 在含跨域 iframe 的站点
+    // （B 站）可能整体注入失败，反而把"本来能采"的会话判死。
+    // 首次启动注入失败 = 本场注定没有音频 → 收敛（cleanupAll）并明确报错，不留幽灵会话。
     if (source === 'page' && captureTabId) {
       const tabId = captureTabId;
       try {
-        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['page-audio.js'] });
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['page-audio.js'] });
         if (stale()) { respond(); return; }
         await chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
         logLine('info', 'app', '[页面采音] 已注入内容脚本并开始采集');
@@ -1292,6 +1316,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     // 它会重试注入、把每一步成败写进日志，并用 await 发送显示令 + 补一次。
     // 原来这里是"探测一次 + 静默 catch + fire-and-forget 发送"，导航竞态下会静默丢掉整个字幕层。
     await ensureOverlay(tabId, '页面已导航');
+    // 页面音源：整页刷新/导航会销毁 page-audio.js（音频图随之消失），必须**重新注入**才继续出字，
+    // 否则表现为"字幕层回来了、但再也不出字幕"（用户实测）。
+    // 注意：这里只注入主帧 —— 每帧各自建图会重复采集同一路音频，且 allFrames 在含跨域 iframe
+    // 的站点（B 站）可能整体失败。
+    void restartPageAudio(tabId);
     // 坑（独立审查 m3）：以前无条件 visible:true —— 用户"隐藏字幕"的选择会在页面导航后
     // 被静默撤销，而 storage 里的 overlayVisible 仍是 false（勾选态与实际显示分叉）。
     // 现在显示与否由 ensureOverlay 读 prefs 决定（overlayVisible !== false），与 START 同一口径。
