@@ -699,25 +699,56 @@ function hideOverlay(tabId: number | null) {
 }
 
 /**
- * 页面音源：刷新/导航后**重新注入 page-audio.js 并恢复采集**。
+ * 页面音源：注入 page-audio.js 并发启动令。返回是否成功启动采集。
  *
- * 上一版这里踩过两个坑，本实现刻意避开：
- *  ① `allFrames: true` —— B 站这类页面含跨域 iframe，整体注入可能失败；而页面音源只需要
- *     **主帧**（播放器就在主帧），所以只注入主帧。
- *  ② 失败时调 `cleanupAll()` —— 那会把**整场会话**拆掉，用户表现就是"刷新后彻底没音频"。
- *     注入失败只是"这一页暂时采不到"，会话本身没问题，**绝不能拆**，记日志即可。
+ * 两个刻意的设计（都是踩过坑之后定下来的）：
+ *
+ * ① **注入优先所有帧、失败回退主帧**：页面音源要覆盖"同源 iframe 里的播放器"（部分门户/CMSS
+ *    把 player 放同源 iframe）。脚本内部有 `frameIsRelevant()` 自滤：顶层帧与同源子帧才采集，
+ *    跨域 iframe 注入后自己会退出，不会把广告音频混进来。若 `allFrames` 整体失败（受限页面等），
+ *    退化为只注主帧，至少主帧还能出声。
+ *
+ * ② **"注入"与"发启动令"必须分开 try，且发令失败绝不 cleanupAll**：
+ *    历史上那次"刷新后彻底没声音"的真正原因就是——注入成功后立刻 sendMessage，而内容脚本的
+ *    监听器还没挂上 → reject → catch 里调了 cleanupAll() → **整场会话被拆**。
+ *    现在发令失败只重试一次、再失败只记日志：会话本身是好的，用户重新点开始即可恢复。
+ */
+async function startPageAudioCapture(tabId: number): Promise<boolean> {
+  try {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['page-audio.js'] });
+    } catch {
+      // 所有帧整体注入失败（跨域帧受限/页面特殊）：退化为只注主帧
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['page-audio.js'] });
+    }
+  } catch (e: any) {
+    logLine('error', 'app', `[页面采音] 注入 page-audio.js 失败：${e?.message || e}`);
+    return false;
+  }
+  const send = () => chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
+  try {
+    await send();
+    return true;
+  } catch { /* 内容脚本刚注入、监听器未就绪：等一拍重试 */ }
+  await new Promise((r) => setTimeout(r, 150));
+  try {
+    await send();
+    return true;
+  } catch (e: any) {
+    logLine('warn', 'app', `[页面采音] 启动令发送失败（内容脚本未就绪）：${e?.message || e}`);
+    return false;
+  }
+}
+
+/**
+ * 页面音源：刷新/导航后**重新注入并恢复采集**。
+ * 失败只记日志、**绝不** cleanupAll —— 会话本身没问题，只是这一页暂时采不到。
  */
 async function restartPageAudio(tabId: number): Promise<void> {
   if (pipelineStatus !== 'Running' || sessionSource !== 'page' || captureTabId !== tabId) return;
-  try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ['page-audio.js'] });
-    if (pipelineStatus !== 'Running' || sessionSource !== 'page' || captureTabId !== tabId) return;
-    await chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
-    logLine('info', 'app', '[页面采音] 页面已刷新/导航 → 已重新注入并恢复采集');
-  } catch (e: any) {
-    // 只记日志：不要 cleanupAll（见函数注释 ②）
-    logLine('warn', 'app', `[页面采音] 导航后重注入失败：${e?.message || e}`);
-  }
+  const ok = await startPageAudioCapture(tabId);
+  if (!ok) return;   // 失败原因已在 startPageAudioCapture 里记了日志
+  logLine('info', 'app', '[页面采音] 页面已刷新/导航 → 已重新注入并恢复采集');
 }
 
 function cleanupAll() {
@@ -1004,27 +1035,21 @@ async function startRecognition(msg: any, respond: () => void) {
       }
     }
 
-    // 页面媒体直采（source='page'）：往当前标签页注入内容脚本再通知开始。
-    // 只注入**主帧**：页面音源取主帧播放器的音频即可；`allFrames` 在含跨域 iframe 的站点
-    // （B 站）可能整体注入失败，反而把"本来能采"的会话判死。
-    // 首次启动注入失败 = 本场注定没有音频 → 收敛（cleanupAll）并明确报错，不留幽灵会话。
+    // 页面媒体直采（source='page'）：注入内容脚本并通知开始（注入策略见 startPageAudioCapture：
+    // 优先所有帧以覆盖同源 iframe 播放器，失败回退主帧；发令失败只记日志、**不**拆会话）。
+    // 但**首次启动**若连内容脚本都注入不进去 / 启动令两次都发不出去 = 本场注定没有音频，
+    // 这时仍然要收敛（cleanupAll）并明确报错，不留"识别中却永远没字幕"的幽灵会话。
     if (source === 'page' && captureTabId) {
       const tabId = captureTabId;
-      try {
-        await chrome.scripting.executeScript({ target: { tabId }, files: ['page-audio.js'] });
-        if (stale()) { respond(); return; }
-        await chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
-        logLine('info', 'app', '[页面采音] 已注入内容脚本并开始采集');
-      } catch (e: any) {
-        if (stale()) { respond(); return; }
-        // 坑（自查）：注入失败若不收敛，会话会停在"识别中"却永远没有音频 —— 正是本仓最忌讳的
-        // 幽灵会话。这里和 tab 捕获失败同款处理：记错误 + 弹提示 + cleanupAll 回到停止态。
-        logLine('error', 'app', `[页面采音] 注入失败: ${e?.message || e}`);
-        sendToPopup({ type: 'ERROR', message: `页面采音注入失败: ${e?.message || e}` });
+      const started = await startPageAudioCapture(tabId);
+      if (stale()) { respond(); return; }
+      if (!started) {
+        sendToPopup({ type: 'ERROR', message: '页面采音启动失败：无法在当前页面注入采集脚本（详见日志）' });
         cleanupAll();
         respond();
         return;
       }
+      logLine('info', 'app', '[页面采音] 已注入内容脚本并开始采集');
     } else if (source === 'page') {
       logLine('error', 'app', '[页面采音] 没有可用的目标标签页（msg.tabId 为空）');
       sendToPopup({ type: 'ERROR', message: '页面采音需要当前标签页，但没有拿到标签页 id' });
