@@ -640,8 +640,86 @@ async function isContentScriptInjected(tabId: number): Promise<boolean> {
   } catch { return false; }
 }
 
+/**
+ * 确保字幕层（content.js）存在并处于"显示"状态，同时补齐权威锁态/字号/回看选项。
+ *
+ * 为什么需要它（用户实测：切换/刷新后"音频还在、字幕层整块消失"）：原来的注入逻辑是
+ * `isContentScriptInjected()` 探测一次 + `.catch(() => {})` 静默吞错，而 `sendToTab` 也是
+ * fire-and-forget。只要探测/注入在导航竞态里失败一次（页面刚 complete、或注入被拒），
+ * 之后所有的 OVERLAY_TOGGLE 全部静默失效 —— 表现为识别在跑、声音也有、但没有任何字幕，
+ * 而且**日志里一个字都没有**，完全无法排查。
+ *
+ * 这里做三件事：① 探测失败就注入，**最多重试 2 次**（间隔 400ms，等页面稳定）；
+ * ② 每一步成败都写进日志缓冲，排查时有据可查；③ 注入成功后用 await 发送显示令并**再补一份**，
+ * 覆盖"层刚建好还没挂监听"的窗口。
+ */
+async function ensureOverlay(tabId: number, reason: string, forceVisible?: boolean): Promise<boolean> {
+  let injected = await isContentScriptInjected(tabId);
+  for (let attempt = 0; !injected && attempt < 2; attempt++) {
+    try {
+      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+      injected = await isContentScriptInjected(tabId);
+      logLine('info', 'app', `[字幕层] ${reason}：注入 content.js（第 ${attempt + 1} 次）${injected ? '并探测通过' : '，探测仍未通过'}`);
+    } catch (e: any) {
+      logLine('warn', 'app', `[字幕层] ${reason}：注入 content.js 失败（第 ${attempt + 1} 次）：${e?.message || e}`);
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+  if (!injected) {
+    logLine('error', 'app', `[字幕层] ${reason}：content.js 无法注入（页面可能禁止脚本注入），字幕不会显示`);
+    return false;
+  }
+  const prefs = (((await chrome.storage.local.get('tmspeech_prefs'))['tmspeech_prefs']) as any) || {};
+  const lock = (await chrome.storage.local.get(LOCK_KEY))[LOCK_KEY] === true;
+  // 显示与否：显式传来（START 时用 popup 的勾选态）优先，否则读偏好——
+  // 保持既有语义：用户"隐藏字幕"的选择不会被导航/重启会话静默撤销。
+  const wantVisible = forceVisible ?? (prefs.overlayVisible !== false);
+  if (!wantVisible) return true;   // 只要层在（供之后手动打开），不主动显示
+  const show = () => chrome.tabs.sendMessage(tabId, { type: 'OVERLAY_TOGGLE', visible: true }).catch(() => false);
+  const ok = await show();
+  if (ok === false) {
+    // 层可能刚被移除/还没挂监听：等一拍再补一次（这就是用户那条"字幕消失"的直接兜底）
+    await new Promise((r) => setTimeout(r, 250));
+    const retry = await show();
+    logLine(retry === false ? 'warn' : 'info', 'app',
+      `[字幕层] ${reason}：显示令${retry === false ? '重试仍失败' : '经重试已生效'}`);
+  }
+  await chrome.tabs.sendMessage(tabId, { type: 'LOCK_TOGGLE', locked: lock }).catch(() => {});
+  if (prefs.fontSize) {
+    await chrome.tabs.sendMessage(tabId, { type: 'SET_FONT_SIZE', fontSize: prefs.fontSize }).catch(() => {});
+  }
+  await chrome.tabs.sendMessage(tabId, {
+    type: 'SET_PREV_OPTS',
+    showPrev: prefs.showPrev !== false,
+    prevOpacity: prefs.prevOpacity ?? 35,
+  }).catch(() => {});
+  return true;
+}
+
 function hideOverlay(tabId: number | null) {
   if (tabId) sendToTab(tabId, { type: 'OVERLAY_TOGGLE', visible: false });
+}
+
+/**
+ * 页面音源：刷新/导航后**重新注入 page-audio.js 并恢复采集**。
+ *
+ * 上一版这里踩过两个坑，本实现刻意避开：
+ *  ① `allFrames: true` —— B 站这类页面含跨域 iframe，整体注入可能失败；而页面音源只需要
+ *     **主帧**（播放器就在主帧），所以只注入主帧。
+ *  ② 失败时调 `cleanupAll()` —— 那会把**整场会话**拆掉，用户表现就是"刷新后彻底没音频"。
+ *     注入失败只是"这一页暂时采不到"，会话本身没问题，**绝不能拆**，记日志即可。
+ */
+async function restartPageAudio(tabId: number): Promise<void> {
+  if (pipelineStatus !== 'Running' || sessionSource !== 'page' || captureTabId !== tabId) return;
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['page-audio.js'] });
+    if (pipelineStatus !== 'Running' || sessionSource !== 'page' || captureTabId !== tabId) return;
+    await chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
+    logLine('info', 'app', '[页面采音] 页面已刷新/导航 → 已重新注入并恢复采集');
+  } catch (e: any) {
+    // 只记日志：不要 cleanupAll（见函数注释 ②）
+    logLine('warn', 'app', `[页面采音] 导航后重注入失败：${e?.message || e}`);
+  }
 }
 
 function cleanupAll() {
@@ -870,32 +948,10 @@ async function startRecognition(msg: any, respond: () => void) {
       closeFloating();
     }
     if (captureTabId && msg.overlayVisible) {
-      const alreadyInjected = await isContentScriptInjected(captureTabId);
+      // 统一走 ensureOverlay：探测→注入（带重试）→显示→补权威锁态/字号/回看选项，
+      // 每一步都有日志。原来这里是一次探测 + 静默 catch，导航竞态下会静默丢掉整个字幕层。
+      await ensureOverlay(captureTabId, '开始识别', true);
       if (stale()) { respond(); return; }
-      if (!alreadyInjected) {
-        await chrome.scripting.executeScript({
-          target: { tabId: captureTabId },
-          files: ['content.js'],
-        }).catch(() => {});
-        if (stale()) { respond(); return; }
-      }
-      sendToTab(captureTabId, { type: 'OVERLAY_TOGGLE', visible: true });
-      // 坑：新建字幕层初始按未锁定样式绘制，content 自身异步读 storage 存在窗口期；
-      // 若权威锁态是"已锁"而无人纠正，就出现用户报告的"锁定后仍有半透明背景/毛玻璃"。
-      // 这里读唯一事实源立即补发 LOCK_TOGGLE，让新层马上收敛到权威锁态。
-      chrome.storage.local.get(LOCK_KEY).then(r => {
-        // fire-and-forget 回调同样要核对会话代次，防止停止后残留回调打扰新会话。
-        if (stale() || !captureTabId) return;
-        sendToTab(captureTabId!, { type: 'LOCK_TOGGLE', locked: r[LOCK_KEY] === true });
-      }).catch(() => {});
-      chrome.storage.local.get('tmspeech_prefs').then(r => {
-        // 坑：此回调是 fire-and-forget，恢复执行时不做代次核对的话，
-        // 停止后残留的回调会把 prefs 发到新会话（或已停止会话）的标签页上。
-        if (stale() || !captureTabId) return;
-        const prefs = (r['tmspeech_prefs'] as any) || {};
-        if (prefs.fontSize) sendToTab(captureTabId!, { type: 'SET_FONT_SIZE', fontSize: prefs.fontSize });
-        sendToTab(captureTabId!, { type: 'SET_PREV_OPTS', showPrev: prefs.showPrev !== false, prevOpacity: prefs.prevOpacity ?? 35 });
-      });
     }
 
     // 坑：不要在这里预先签发 capture streamId！它的有效期很短，而 offscreen 冷启动
@@ -950,12 +1006,14 @@ async function startRecognition(msg: any, respond: () => void) {
       }
     }
 
-    // 页面媒体直采（source='page'）：往当前标签页注入内容脚本（含同源子帧）再通知开始。
-    // 注入失败不拆会话：写日志 + 提示，用户可切回其它音源重试。
+    // 页面媒体直采（source='page'）：往当前标签页注入内容脚本再通知开始。
+    // 只注入**主帧**：页面音源取主帧播放器的音频即可；`allFrames` 在含跨域 iframe 的站点
+    // （B 站）可能整体注入失败，反而把"本来能采"的会话判死。
+    // 首次启动注入失败 = 本场注定没有音频 → 收敛（cleanupAll）并明确报错，不留幽灵会话。
     if (source === 'page' && captureTabId) {
       const tabId = captureTabId;
       try {
-        await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: ['page-audio.js'] });
+        await chrome.scripting.executeScript({ target: { tabId }, files: ['page-audio.js'] });
         if (stale()) { respond(); return; }
         await chrome.tabs.sendMessage(tabId, { type: 'PAGE_AUDIO_START' });
         logLine('info', 'app', '[页面采音] 已注入内容脚本并开始采集');
@@ -1031,7 +1089,7 @@ chrome.runtime.onConnect.addListener((port) => {
       // 只收当前会话、当前标签页的块：防止切换音源/换标签页后旧内容脚本继续喂音频
       if (sessionSource !== 'page' || tabId == null || tabId !== captureTabId) return;
       try {
-        offscreenPort?.postMessage({ type: 'PAGE_AUDIO', audio: m.audio, sampleRate: m.sampleRate });
+        offscreenPort?.postMessage({ type: 'PAGE_AUDIO', audio: m.audio, sampleRate: m.sampleRate, ts: m.ts });
       } catch { /* offscreen 未就绪：丢弃本块（开始阶段的头几块，影响可忽略） */ }
       return;
     }
@@ -1284,17 +1342,18 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   setTimeout(async () => {
     // 坑：executeScript 每次都会注入一份全新的 content.js 副本，而每份副本都会创建
     // 自己的字幕层——不加探测就直接注入，导航几次就叠几层悬浮字幕。先 PING 再注入。
-    const already = await isContentScriptInjected(tabId);
-    if (!already) {
-      await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }).catch(() => {});
-    }
+    // 另外（用户实测：切换/刷新后"音频还在、字幕层整块消失"）：这里必须走 ensureOverlay ——
+    // 它会重试注入、把每一步成败写进日志，并用 await 发送显示令 + 补一次。
+    // 原来这里是"探测一次 + 静默 catch + fire-and-forget 发送"，导航竞态下会静默丢掉整个字幕层。
+    await ensureOverlay(tabId, '页面已导航');
+    // 页面音源：整页刷新/导航会销毁 page-audio.js（音频图随之消失），必须**重新注入**才继续出字，
+    // 否则表现为"字幕层回来了、但再也不出字幕"（用户实测）。
+    // 注意：这里只注入主帧 —— 每帧各自建图会重复采集同一路音频，且 allFrames 在含跨域 iframe
+    // 的站点（B 站）可能整体失败。
+    void restartPageAudio(tabId);
     // 坑（独立审查 m3）：以前无条件 visible:true —— 用户"隐藏字幕"的选择会在页面导航后
     // 被静默撤销，而 storage 里的 overlayVisible 仍是 false（勾选态与实际显示分叉）。
-    chrome.storage.local.get('tmspeech_prefs').then(r => {
-      const prefs = (r['tmspeech_prefs'] as any) || {};
-      sendToTab(tabId, { type: 'OVERLAY_TOGGLE', visible: prefs.overlayVisible !== false });
-      if (prefs.fontSize) sendToTab(tabId, { type: 'SET_FONT_SIZE', fontSize: prefs.fontSize });
-    });
+    // 现在显示与否由 ensureOverlay 读 prefs 决定（overlayVisible !== false），与 START 同一口径。
     if (offscreenPort) offscreenPort.postMessage({ type: 'RESEND_CURRENT_TEXT' });
 
     // 坑（审查抓到的幽灵会话）：**整页导航会销毁旧内容脚本** —— 音频图随之消失、Port 断开
